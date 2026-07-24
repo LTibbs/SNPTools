@@ -29,8 +29,9 @@ const ICONS = {
 /* ================= TOOL REGISTRY ================= */
 const GROUPS = [
   {label:'Visualization & Search', tools:['snpversity','snptrait']},
-  {label:'Explore & Analyze', tools:['snpimpact','snpfunction', 'snpfold', 'paneffect']},
-  {label:'Compare & Relate', tools:['snpcompare','snptree','snpmatrix']},
+  {label:'Explore & Analyze', tools:['snpimpact','snpfunction', 'snpfold']},
+  {label:'Compare & Relate', tools:['snpcompare','snptree']},
+  {label:'External plugin', tools:['paneffect']},
   //{label:'Impute & Predict', tools:['snpimpute','snpfold']},
   //{label:'Collection', tools:['snpgermplasm']},
 ];

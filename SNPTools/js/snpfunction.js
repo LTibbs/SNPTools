@@ -23,9 +23,98 @@
 
   function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
   function scoreColor(v){ const lo=-12,hi=6,t=Math.max(0,Math.min(1,(v-lo)/(hi-lo))); const r=t<.5?255:Math.round(255*(1-(t-.5)*2)); const g=t<.5?Math.round(255*t*2):200; return `rgb(${r},${Math.max(60,g)},60)`; }
-  function scoreCell(v){ return v==null?'<span style="color:var(--faint)">—</span>':`<span class="imp-score" style="background:${scoreColor(v)}">${v>0?'+':''}${v.toFixed(1)}</span>`; }
+
+  /* Choose black or white text from the actual score-chip background.
+     Pale yellow and green backgrounds receive dark text automatically,
+     while darker red/green backgrounds retain white text. */
+  function contrastTextColor(background){
+    const text = String(background || '').trim();
+    let rgb = null;
+    const hex = text.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+    if (hex){
+      let h = hex[1];
+      if (h.length === 3) h = h.split('').map(c => c+c).join('');
+      rgb = [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16), parseInt(h.slice(4,6),16)];
+    } else {
+      const nums = text.match(/[0-9.]+/g);
+      if (nums && nums.length >= 3) rgb = nums.slice(0,3).map(Number);
+    }
+    if (!rgb || rgb.some(v => !Number.isFinite(v))) return '#ffffff';
+    const linear = rgb.map(v => {
+      const c = Math.max(0,Math.min(255,v))/255;
+      return c <= 0.04045 ? c/12.92 : Math.pow((c+0.055)/1.055,2.4);
+    });
+    const luminance = 0.2126*linear[0] + 0.7152*linear[1] + 0.0722*linear[2];
+    return luminance > 0.179 ? '#111827' : '#ffffff';
+  }
+  function scoreCell(v){
+    if (v==null) return '<span style="color:var(--faint)">—</span>';
+    const bg = scoreColor(v);
+    const fg = contrastTextColor(bg);
+    return `<span class="imp-score" style="background:${bg};color:${fg} !important;text-shadow:none">${v>0?'+':''}${v.toFixed(1)}</span>`;
+  }
   function prioPill(p){ return `<span class="prio ${(p||'LOW').toLowerCase()}">${p||'LOW'}</span>`; }
   function consPill(v){ return `<span class="cons ${v.consClass}">${v.consequence}</span>`; }
+
+  /* ---------- per-allele jumps: PanEffect (effects ↗) and SNPFold (fold ↗) ----------
+     Both act on a row in the damaging-allele catalog, so they resolve the gene from
+     FN.data rather than taking it as an argument. */
+  function isMissense(v){
+    return !!v && (v.consClass==='missense' || /missense/i.test(v.consequence||''));
+  }
+  /* Consequence classes SNPFold has a variant record for. Synonymous alleles are
+     deliberately absent — SNPFold's coding-variant table does not carry them — as is
+     'other' (non-coding). Trim or extend this one list to change which rows link. */
+  const FOLD_CONS = ['missense', 'lof', 'indel', 'splice'];
+  function canFold(v){ return !!v && FOLD_CONS.indexOf(v.consClass) !== -1; }
+  function fnGene(){ return (FN.data && FN.data.gene) || FN.gene || ''; }
+
+  /* Protein substitution ("A123T") when the record carries one, in whichever shape.
+     Returns '' when the allele is not a single amino-acid change. */
+  function aaSub(v){
+    if (!v) return '';
+    if (nonEmptyStr(v.sub)) return String(v.sub);
+    if (nonEmptyStr(v.aaRef) && nonEmptyStr(v.aaAlt) && v.resi!=null) return `${v.aaRef}${v.resi}${v.aaAlt}`;
+    /* v.variant is often already the protein notation for coding alleles */
+    const m = String(v.variant||'').match(/^([A-Z*])(\d+)([A-Z*])$/i);
+    return m ? m[0] : '';
+  }
+  function nonEmptyStr(x){ return x != null && String(x) !== ''; }
+
+  function peJump(v){
+    if (!isMissense(v) || !fnGene()) return '';
+    const sub = aaSub(v);
+    return ` <a class="pe-jump" href="#" title="View ${esc(sub||'this substitution')} in PanEffect"
+      onclick="event.stopPropagation();FUNCTION.panEffect('${esc(v.id)}');return false;">effects ↗</a>`;
+  }
+  function foldJump(v){
+    if (!canFold(v) || !fnGene()) return '';
+    return ` <a class="fold-jump" href="#" title="Show ${esc(aaSub(v)||v.variant||'this allele')} on the predicted protein structure in SNPFold"
+      onclick="event.stopPropagation();FUNCTION.fold('${esc(v.id)}');return false;">fold ↗</a>`;
+  }
+
+  /* view switches — same contracts the other tools use */
+  function panEffectTo(v){
+    const gene = fnGene(); if (!gene) return;
+    if (typeof goPanEffect !== 'function') return go('paneffect');
+    const sub = isMissense(v) ? aaSub(v) : '';
+    goPanEffect(gene, sub ? {variant:sub} : undefined);
+  }
+  /* Hands the gene *and* the site to SNPFold. SNPFold reuses an already-loaded gene,
+     so clicking several of these in a row triggers no further HDF5 queries. */
+  function foldTo(v){
+    const gene = fnGene(); if (!gene) return;
+    if (typeof goFold !== 'function') return go('snpfold');
+    if (!canFold(v)) return goFold(gene);          // nothing to highlight — open the gene
+    const d = FN.data || {};
+    const site = { sub: aaSub(v), effect: v.consequence };
+    if (d.chr != null)   site.chr  = d.chr;        // descriptor fields are optional;
+    if (v.pos != null)   site.pos  = v.pos;        // include only what this record has,
+    if (v.ref != null)   site.ref  = v.ref;        // so the matcher falls back cleanly
+    if (v.alt != null)   site.alt  = v.alt;
+    if (v.resi != null)  site.resi = v.resi;
+    goFold(gene, site);
+  }
 
   /* ---------- dataset chooser (compact; shares Data.datasets() with SNPVersity) ---------- */
   function nonEmpty(v){ return v != null && v !== ''; }
@@ -292,7 +381,7 @@
       const open = FN.openId===v.id;
       return `<tr class="imp-row ${open?'open':''}" onclick="FUNCTION.toggle('${v.id}')">
         <td class="c-mono c-alt" style="padding-left:11px">${v.variant}</td>
-        <td>${consPill(v)}</td>
+        <td>${consPill(v)}${peJump(v)}${foldJump(v)}</td>
         <td>${domTag(v.domain)}</td>
         <td class="num">${scoreCell(v.plantcad)}</td>
         ${sec?`<td class="num">${scoreCell(v.plantcad2)}</td>`:''}
@@ -590,6 +679,10 @@
     load(){ const el=document.getElementById('fnGeneInput'); if(!el)return; const g=el.value.trim(); if(!g)return;
       FN.gene=g; FN.data=null; FN.openId=null; analyzeGene(); },
     toggle(id){ FN.openId = (FN.openId===id?null:id); paint(); },
+    panEffect(id){ const d=FN.data; if(!d||!d.damaging) return;
+      panEffectTo(d.damaging.find(v=>String(v.id)===String(id))); },
+    fold(id){ const d=FN.data; if(!d||!d.damaging) return;
+      foldTo(d.damaging.find(v=>String(v.id)===String(id))); },
 
     /* Hand this gene's region + the accessions carrying an alternative allele
        over to SNPVersity.  alleleId 'all' = every damaging allele in the table.
@@ -688,6 +781,10 @@
         border-top:1px solid var(--line);padding-top:10px}
       .btn.tiny{font-size:11px;padding:4px 9px;border-radius:7px;line-height:1.3;white-space:nowrap}
       td.fn-send{text-align:right;padding-right:10px;white-space:nowrap}
+      /* per-row jump links in the Consequence column */
+      table.imp .fold-jump{font-size:11px;white-space:nowrap;margin-left:4px;
+        color:#176c3a;text-decoration:none;border-bottom:1px dotted #9ecdb1}
+      table.imp .fold-jump:hover{color:#0f4f2a;border-bottom-style:solid}
       /* compact dataset chooser (shares Data.datasets() with SNPVersity) */
       .fn-ds-card{padding:12px 14px}
       .fn-ds-head{font-size:10.5px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:9px}

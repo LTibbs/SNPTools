@@ -24,12 +24,17 @@
     showVar: true,
     viewer: null, libState: 'idle',
     dataset: null, sec: false,  // sec = show PlantCAD2/ESM2/ESM3 (MaizeGDB 2026 only)
+    structSource: null,  // 'alphafold' | 'boltz' | 'esmfold' | null — which folder the current FD.struct/FD.pdb came from
+    modelPref: 'best',   // 'best' | 'alphafold' | 'boltz' | 'esmfold' — user's model choice for the next load
     carriers: null, openCarrier: null,   // pos|ref|alt -> {carriersHom,carriersHet,het,hom} (whole-panel, via geneFunction)
     locus: null,         // {chr,start,end,dataset} for this gene — used for the SNPVersity handoff
     sort: { key: null, dir: 'asc' },     // variant-table sort: column key + direction ('asc'|'desc'); null key = file order
+    pendingVariant: null,// {chr,pos,ref,alt,sub,…} handed over by another tool; selected once variants are in hand
+    truncation: null,    // {structureLength,maxVariantResidue,beyondCount,sourceLabel} when variants extend past the loaded model
     root: null,          // persistent DOM container — survives navigation to other tools
     loaded: false,       // a gene's heavy content is (being) rendered into root
     loadedGene: null,    // which gene that content is for
+    pdbResidueMap: null, // residue number -> one-letter amino acid, built lazily from the loaded PDB
   };
 
   /* ---------- palettes ---------- */
@@ -46,6 +51,70 @@
   const CONS_FILL = { lof:'#d6322a', missense:'#2f5bbf', lod:'#b54708', splice:'#6d28d9', indel:'#176c3a', syn:'#8a93a3' };
   const SS_LABEL = { H:'α-helix', E:'β-strand', C:'loop / coil' };
 
+  /* ---------- structure source (AlphaFold2 vs Boltz2) ----------
+     Checked in this order — first folder that actually has the gene's file wins. */
+  const STRUCT_SOURCES = [
+    { key: 'alphafold', dir: './data/structures/alphafold', label: 'AlphaFold2', badge: 'AF2' },
+    { key: 'boltz',      dir: './data/structures/boltz',     label: 'Boltz2',     badge: 'B2'  },
+    { key: 'esmfold',    dir: './data/structures/esmfold',   label: 'ESMFold',    badge: 'ESM'  },
+  ];
+
+  /* Loads structure-<gene>.js as a <script> tag (same mechanism the app already uses to
+     bring in per-gene structure files) and resolves true once it has run, or rejects if
+     the file 404s / errors — which is how we tell "not in this folder" from "loaded". */
+  function loadScriptOnce(src){
+    return new Promise((resolve, reject) => {
+      const tag = 'data-foldsrc';
+      const existing = document.querySelector(`script[${tag}="${src}"]`);
+      if (existing){ resolve(true); return; }
+      const el = document.createElement('script');
+      el.src = src;
+      el.async = true;
+      el.setAttribute(tag, src);
+      el.onload = () => resolve(true);
+      el.onerror = () => { el.remove(); reject(new Error('not found: ' + src)); };
+      document.head.appendChild(el);
+    });
+  }
+
+  /* Data.structureFor(gene) / Data.pdbFor(gene) is a SINGLE shared slot per gene: whichever
+     structure-<gene>.js last actually *executed* is what's sitting in it. loadScriptOnce also
+     skips re-running a <script> that's already in the DOM. Put those two things together and
+     re-selecting a source you've already loaded before would read Data's shared slot as-is
+     without re-executing that source's script — so it silently returns whatever source last
+     wrote there, not the one you just asked for. In practice that source is whichever one was
+     loaded last (e.g. ESMFold, if it's last in the 'best' fallback order or was picked at some
+     point), and it then "sticks" no matter what you pick afterward.
+     Fix: snapshot each source's struct/pdb into our OWN cache the instant its script loads,
+     before any other source's script can overwrite Data's shared slot — then always read from
+     this cache rather than re-reading Data.structureFor/pdbFor after the fact. */
+  const structCache = Object.create(null);   // "<gene>::<sourceKey>" -> { struct, pdb }
+
+  async function resolveStructureSource(gene, pref){
+    const order = (!pref || pref === 'best') ? STRUCT_SOURCES : STRUCT_SOURCES.filter(s => s.key === pref);
+    for (const src of order){
+      const cacheKey = gene + '::' + src.key;
+      if (structCache[cacheKey]) return { src, data: structCache[cacheKey] };  // already resolved this one — use our snapshot, not Data's shared slot
+      try { await loadScriptOnce(`${src.dir}/structure-${gene}.js`); }
+      catch (e){ continue; }             // no file for this gene in this folder — try next
+      const struct = Data.structureFor(gene);
+      if (struct){
+        const data = { struct, pdb: Data.pdbFor(gene) };
+        structCache[cacheKey] = data;    // snapshot now, before another source's script can overwrite Data's slot
+        return { src, data };
+      }
+    }
+    return null;
+  }
+
+  /* small "AlphaFold2" / "Boltz2" pill shown next to the gene once a model has loaded */
+  function structSourceBadge(){
+    const src = STRUCT_SOURCES.find(s => s.key === FD.structSource);
+    if (!src) return '';
+    return `<span class="fold-src-badge ${src.key}" title="Predicted structure from ${src.label}">
+      <span class="fold-src-dot"></span>${src.label}</span>`;
+  }
+
   /* language-model score pill — same gradient (red→green) as SNPImpact / SNPFunction */
   function finiteNumber(v){
     if (v == null || v === '' || v === '.' || v === 'NA' || v === 'N/A') return null;
@@ -60,11 +129,36 @@
     const g=t<.5?Math.round(255*t*2):200;
     return `rgb(${r},${Math.max(60,g)},60)`;
   }
+
+  /* Choose black or white text from the actual chip background. The 0.179
+     luminance cutoff is the point at which black and white have equal WCAG
+     contrast; pale yellow/green chips therefore get dark text automatically. */
+  function contrastTextColor(background){
+    const text = String(background || '').trim();
+    let rgb = null;
+    const hex = text.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+    if (hex){
+      let h = hex[1];
+      if (h.length === 3) h = h.split('').map(c => c+c).join('');
+      rgb = [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16), parseInt(h.slice(4,6),16)];
+    } else {
+      const nums = text.match(/[0-9.]+/g);
+      if (nums && nums.length >= 3) rgb = nums.slice(0,3).map(Number);
+    }
+    if (!rgb || rgb.some(v => !Number.isFinite(v))) return '#ffffff';
+    const linear = rgb.map(v => {
+      const c = Math.max(0,Math.min(255,v))/255;
+      return c <= 0.04045 ? c/12.92 : Math.pow((c+0.055)/1.055,2.4);
+    });
+    const luminance = 0.2126*linear[0] + 0.7152*linear[1] + 0.0722*linear[2];
+    return luminance > 0.179 ? '#111827' : '#ffffff';
+  }
   function scoreCell(v){
     const n = finiteNumber(v);
-    return n==null
-      ? '<span style="color:var(--faint)">—</span>'
-      : `<span class="imp-score" style="background:${scoreColor(n)}">${n>0?'+':''}${n.toFixed(1)}</span>`;
+    if (n == null) return '<span style="color:var(--faint)">—</span>';
+    const bg = scoreColor(n);
+    const fg = contrastTextColor(bg);
+    return `<span class="imp-score" style="background:${bg};color:${fg} !important;text-shadow:none">${n>0?'+':''}${n.toFixed(1)}</span>`;
   }
   function scoreText(v){
     const n = finiteNumber(v);
@@ -112,6 +206,361 @@
   function escFold(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
   function carrierKey(v){ return v.pos+'|'+v.refNt+'|'+v.altNt; }
   function carrierOf(v){ return FD.carriers ? (FD.carriers[carrierKey(v)] || null) : null; }
+
+  /* SNPVersity annotates domains by genomic position, while SNPFold needs
+     protein-coordinate intervals. Load the canonical protein-domain index
+     directly and try the gene, protein/transcript IDs, and common B73-v5
+     isoform aliases. Per-variant genomic domain text remains a fallback. */
+  function usableDomainText(v){
+    if (v == null) return null;
+    const s = String(v).trim();
+    return (!s || s === '—' || s === '-' || /^N\/?A$/i.test(s)) ? null : s;
+  }
+  function domainFromText(value){
+    const text = usableDomainText(value);
+    if (!text) return null;
+    const m = text.match(/(PF\d{4,6})/i);
+    const pfam = m ? m[1].toUpperCase() : null;
+    const name = pfam ? text.replace(/\s*\(?\s*PF\d{4,6}\s*\)?\s*/i, ' ').trim() : text;
+    return { name:name || text, pfam, kind:'domain', source:'variant' };
+  }
+  function normalizeDomainRecord(raw){
+    if (!raw) return null;
+    if (Array.isArray(raw)){
+      const start = finiteNumber(raw[0]), end = finiteNumber(raw[1]);
+      if (start == null || end == null) return null;
+      return { start:Math.min(start,end), end:Math.max(start,end),
+        name:String(raw[2] || raw[3] || 'Pfam domain'),
+        pfam:usableDomainText(raw[3]), kind:String(raw[4] || 'domain').toLowerCase() === 'region' ? 'region' : 'domain' };
+    }
+    if (typeof raw !== 'object') return null;
+    const start = finiteNumber(raw.start != null ? raw.start : (raw.aaStart != null ? raw.aaStart : (raw.begin != null ? raw.begin : raw.from)));
+    const end   = finiteNumber(raw.end   != null ? raw.end   : (raw.aaEnd   != null ? raw.aaEnd   : (raw.stop  != null ? raw.stop  : raw.to)));
+    if (start == null || end == null) return null;
+    const kind = String(raw.kind || raw.type || 'domain').toLowerCase() === 'region' ? 'region' : 'domain';
+    return { ...raw, start:Math.min(start,end), end:Math.max(start,end), kind,
+      name:String(raw.name || raw.label || raw.domain || raw.description || 'Pfam domain'),
+      pfam:usableDomainText(raw.pfam || raw.accession || raw.pfamId || raw.id) };
+  }
+  function addUniqueValue(list, value){
+    if (value == null || value === '') return;
+    const text = String(value).trim();
+    if (text && !list.includes(text)) list.push(text);
+  }
+  function canonicalDomainKeys(fn){
+    const keys = [];
+    addUniqueValue(keys, FD.gene);
+    if (fn){
+      addUniqueValue(keys, fn.gene); addUniqueValue(keys, fn.protein);
+      addUniqueValue(keys, fn.proteinId); addUniqueValue(keys, fn.transcript);
+      addUniqueValue(keys, fn.transcriptId);
+    }
+    const st = FD.struct || {};
+    [st.gene, st.id, st.protein, st.proteinId, st.protein_id,
+     st.transcript, st.transcriptId, st.transcript_id, st.model].forEach(v=>addUniqueValue(keys,v));
+    const gene = String(FD.gene || '').trim();
+    if (gene){
+      ['_P001','.P001','-P001','_P002','.P002','-P002',
+       '_T001','.T001','-T001','_T002','.T002','-T002'].forEach(suffix=>addUniqueValue(keys,gene+suffix));
+    }
+    return keys;
+  }
+  async function loadCanonicalDomainRecords(fn){
+    const records = [];
+    if (fn && Array.isArray(fn.domains)) records.push({key:FD.gene, domains:fn.domains});
+    if (typeof Data === 'undefined' || typeof Data.geneDomains !== 'function') return records;
+    if (typeof Data.ensureGeneDomains === 'function'){
+      try { await Data.ensureGeneDomains(); } catch (e) { /* retain structure/variant domains */ }
+    }
+    canonicalDomainKeys(fn).forEach(key=>{
+      try {
+        const gd = Data.geneDomains(key);
+        if (gd && Array.isArray(gd.domains) && gd.domains.length) records.push({key, ...gd});
+      } catch (e) { /* try the remaining aliases */ }
+    });
+    return records;
+  }
+  function mergeCanonicalDomains(fn, domainRecords){
+    if (!FD.struct) return;
+    const current = (FD.struct.domains || []).map(normalizeDomainRecord).filter(Boolean);
+    const canonical = [];
+    if (fn && Array.isArray(fn.domains)) canonical.push(...fn.domains);
+    (domainRecords || []).forEach(record=>{
+      if (record && Array.isArray(record.domains)) canonical.push(...record.domains);
+    });
+    const out = [], seen = new Set(), L = finiteNumber(FD.struct.length);
+    current.concat(canonical.map(normalizeDomainRecord).filter(Boolean)).forEach(d => {
+      if (L != null){
+        d.start = Math.max(1, Math.min(L, d.start));
+        d.end   = Math.max(1, Math.min(L, d.end));
+        if (d.end < d.start) return;
+      }
+      const key = [d.start,d.end,d.name,d.pfam||'',d.kind].join('|');
+      if (!seen.has(key)){ seen.add(key); out.push(d); }
+    });
+    out.sort((a,b)=>a.start-b.start || a.end-b.end);
+    FD.struct.domains = out;
+  }
+
+  function foldVariantKey(v){
+    if (!v || v.pos == null) return null;
+    const ref = v.refNt != null ? v.refNt : v.ref;
+    const alt = v.altNt != null ? v.altNt : v.alt;
+    return [v.pos, ref == null ? '' : ref, alt == null ? '' : alt].join('|');
+  }
+  function severeFoldConsequence(v){
+    const s = String((v && v.consequence) || '').toLowerCase();
+    return (v && v.consClass === 'lof') || /stop gained|nonsense|frameshift|start lost|stop lost/.test(s);
+  }
+  function foldRelevant(v){ return v && (v.consClass === 'missense' || v.consClass === 'lof' || v.consClass === 'indel'); }
+
+  const AA3_FOLD = {ALA:'A',ARG:'R',ASN:'N',ASP:'D',CYS:'C',GLN:'Q',GLU:'E',GLY:'G',HIS:'H',ILE:'I',
+    LEU:'L',LYS:'K',MET:'M',PHE:'F',PRO:'P',SER:'S',THR:'T',TRP:'W',TYR:'Y',VAL:'V',TER:'*',SEC:'U'};
+  /* Parse only genuine protein notation. A genomic fallback such as
+     "123456 A>G" starts with a number and must never become residue 123456. */
+  function aaFromVariantLabel(label){
+    const raw = String(label || '').trim();
+    if (!raw) return {ref:'',resi:null,alt:''};
+    const hadProteinPrefix = /^p\./i.test(raw);
+    const s = raw.replace(/^p\./i,'').replace(/[()\s]/g,'');
+    if (!hadProteinPrefix && !/^(?:[A-Z*]|[A-Za-z]{3})\d+/.test(s)) return {ref:'',resi:null,alt:''};
+    let m = s.match(/^([A-Z*])(\d+)(fs\*?|ins|del|ext\*?\d*|\?|[A-Z*]|=)?$/i);
+    if (m) return {ref:(m[1]||'').toUpperCase(), resi:Number(m[2]), alt:(m[3]||'').replace(/^fs\*$/i,'fs')};
+    m = s.match(/^([A-Za-z]{3})(\d+)([A-Za-z]{3}|Ter|\*|fs\*?|ins|del|ext\*?\d*|\?)?/i);
+    if (m){
+      const ref = AA3_FOLD[m[1].toUpperCase()] || '';
+      const tok = m[3] || '';
+      const alt = AA3_FOLD[tok.toUpperCase()] || (/^fs/i.test(tok)?'fs':tok);
+      return {ref, resi:Number(m[2]), alt};
+    }
+    return {ref:'',resi:null,alt:''};
+  }
+  function plausibleResidue(value, maxLength){
+    const n = finiteNumber(value), max = finiteNumber(maxLength);
+    if (n == null || n < 1 || Math.floor(n) !== n) return null;
+    if (max != null && n > max) return null;
+    return n;
+  }
+  function modelProteinLength(model){
+    const cds = modelCds(model);
+    if (!cds.length) return null;
+    const nt = cds.reduce((sum,iv)=>sum+(iv[1]-iv[0]+1),0);
+    return nt > 0 ? Math.floor(nt/3) : null;
+  }
+
+  const AA1_FOLD = new Set('ARNDCQEGHILKMFPSTWYVUO'.split(''));
+  function cleanAaLetter(value){
+    const aa = String(value == null ? '' : value).trim().toUpperCase();
+    return aa.length === 1 && AA1_FOLD.has(aa) ? aa : '';
+  }
+  function sequenceAaAt(resi){
+    if (!FD.struct || resi == null) return '';
+    const fields = ['sequence','seq','proteinSequence','protein_sequence','aaSequence','aa_sequence'];
+    for (const key of fields){
+      let seq = FD.struct[key];
+      if (Array.isArray(seq)) seq = seq.join('');
+      if (typeof seq !== 'string') continue;
+      seq = seq.replace(/[^A-Za-z*]/g,'').toUpperCase();
+      const aa = cleanAaLetter(seq.charAt(resi-1));
+      if (aa) return aa;
+    }
+    return '';
+  }
+  function buildPdbResidueMap(){
+    if (FD.pdbResidueMap) return FD.pdbResidueMap;
+    const map = new Map();
+    String(FD.pdb || '').split(/\r?\n/).forEach(line => {
+      if (!/^(ATOM  |HETATM)/.test(line) || line.length < 26) return;
+      const resi = Number.parseInt(line.slice(22,26).trim(),10);
+      if (!Number.isFinite(resi) || map.has(resi)) return;
+      const aa = AA3_FOLD[line.slice(17,20).trim().toUpperCase()] || '';
+      if (aa && aa !== '*') map.set(resi, aa);
+    });
+    FD.pdbResidueMap = map;
+    return map;
+  }
+  function structureAaAt(resi){
+    const r = plausibleResidue(resi);
+    if (r == null) return '';
+    return sequenceAaAt(r) || buildPdbResidueMap().get(r) || '';
+  }
+  function referenceAaAt(v, resi, supplied){
+    /* The loaded protein is the authority. This prevents a genomic REF base
+       (A/C/G/T) from being mistaken for a one-letter amino-acid code. */
+    const fromStructure = structureAaAt(resi);
+    if (fromStructure) return fromStructure;
+    const explicit = [v && v.aaRef, v && v.refAa, v && v.refAA,
+      v && v.referenceAa, v && v.referenceAA, supplied];
+    for (const value of explicit){
+      const aa = cleanAaLetter(value);
+      if (aa) return aa;
+    }
+    return '';
+  }
+  function modelCds(model){
+    if (!model) return [];
+    let cds = model.cds || model.CDS || model.cdsIntervals || model.coding ||
+      (model.intervals_by_feature && model.intervals_by_feature.cds) || [];
+    if (!Array.isArray(cds)) return [];
+    return cds.map(iv=>{
+      if (Array.isArray(iv)) return [finiteNumber(iv[0]),finiteNumber(iv[1])];
+      if (iv && typeof iv === 'object') return [finiteNumber(iv.start),finiteNumber(iv.end)];
+      return [null,null];
+    }).filter(iv=>iv[0]!=null && iv[1]!=null).map(iv=>[Math.min(iv[0],iv[1]),Math.max(iv[0],iv[1])]);
+  }
+  /* Convert a one-based genomic position to a one-based amino-acid residue by
+     walking the canonical CDS in transcript order. */
+  function genomicToResidue(pos, model){
+    pos = finiteNumber(pos);
+    if (pos == null) return null;
+    const strand = String((model && model.strand) || '+') === '-' ? '-' : '+';
+    const cds = modelCds(model).sort((a,b)=>strand==='-' ? b[0]-a[0] : a[0]-b[0]);
+    let codingBefore = 0;
+    for (const [start,end] of cds){
+      if (pos >= start && pos <= end){
+        const within = strand === '-' ? end-pos : pos-start;
+        return plausibleResidue(Math.floor((codingBefore + within)/3) + 1);
+      }
+      codingBefore += end-start+1;
+    }
+    return null;
+  }
+  async function loadFoldGeneModel(fn){
+    if (typeof Data === 'undefined' || typeof Data.geneModelOf !== 'function') return null;
+    let chr = fn && fn.chr;
+    if (!chr && typeof Data.lookupGene === 'function'){
+      try { const g = await Data.lookupGene(FD.gene); chr = g && g.chr; } catch (e) { /* no coordinate fallback */ }
+    }
+    if (!chr) return null;
+    if (typeof Data.ensureGeneModels === 'function'){
+      try { await Data.ensureGeneModels(chr); } catch (e) { return null; }
+    }
+    try { return Data.geneModelOf(chr, FD.gene); } catch (e) { return null; }
+  }
+  function proteinVariantLabel(v, resi, ref, alt){
+    if (resi == null) return v.variant || (v.pos != null ? `${v.pos} ${v.ref||v.refNt||''}>${v.alt||v.altNt||''}` : v.consequence);
+    const consequence = String(v.consequence || '').toLowerCase();
+    const r = referenceAaAt(v, resi, ref);
+    /* Compact one-letter display used elsewhere in SNPFold. When the loaded
+       structure still cannot identify the residue, use X rather than the
+       invalid HGVS-like form p.?298*. */
+    const displayRef = r || 'X';
+    if (/stop gained|nonsense/.test(consequence)) return `p.${displayRef}${resi}*`;
+    if (/frameshift/.test(consequence)) return `p.${displayRef}${resi}fs`;
+    if (/start lost/.test(consequence)) return `p.${displayRef === 'X' ? 'M' : displayRef}${resi}?`;
+    if (/stop lost/.test(consequence)) return `p.*${resi}${alt && alt!=='*' ? alt : 'ext'}`;
+    if (/in-frame insertion|inframe insertion/.test(consequence)) return `p.${displayRef}${resi}ins`;
+    if (/in-frame deletion|inframe deletion/.test(consequence)) return `p.${displayRef}${resi}del`;
+    return `p.${displayRef}${resi}${alt || '?'}`;
+  }
+  function resolvedResidue(v, model){
+    const parsed = aaFromVariantLabel(v && v.variant);
+    const proteinLength = modelProteinLength(model);
+    const parsedResi = plausibleResidue(parsed.resi, proteinLength);
+    const convertedResi = genomicToResidue(v && v.pos, model);
+    const genomicPos = finiteNumber(v && v.pos);
+    /* Explicit residue fields are a final fallback because some data sources have
+       historically populated them with the genomic DNA position. Validate them
+       against the canonical CDS length when available and reject an exact copy of
+       the genomic coordinate. */
+    const explicit = [v && v.resi, v && v.residue, v && v.aaPos, v && v.aa_position,
+      v && v.proteinPos, v && v.protein_position]
+      .map(x=>plausibleResidue(x, proteinLength))
+      .find(x=>x!=null && (genomicPos==null || x!==genomicPos));
+    return { parsed, resi: parsedResi != null ? parsedResi :
+      (convertedResi != null ? convertedResi : (explicit != null ? explicit : null)) };
+  }
+  function normalizeFunctionVariant(v, index, model){
+    if (!foldRelevant(v)) return null;
+    const resolved = resolvedResidue(v, model), aa = resolved.parsed, resi = resolved.resi;
+    const ref = referenceAaAt(v, resi, v.aaRef || v.refAa || aa.ref || '');
+    const alt = v.aaAlt || v.altAa || aa.alt || null;
+    return {
+      id:'ffn'+index, gene:FD.gene, resi, ref, alt,
+      variant:proteinVariantLabel(v, resi, ref, alt),
+      consequence:v.consequence || (v.consClass === 'lof' ? 'Loss-of-function' : 'Coding variant'),
+      consClass:v.consClass, structural:v.consClass === 'missense',
+      pos:v.pos, refNt:v.refNt != null ? v.refNt : v.ref, altNt:v.altNt != null ? v.altNt : v.alt,
+      impact:v.impact || v.impactLevel || null, maf:v.maf != null ? v.maf : v.af, domain:v.domain,
+      plantcad:v.plantcad != null ? v.plantcad : v.pc1, plantcad2:v.plantcad2 != null ? v.plantcad2 : v.pc2,
+      esm:v.esm != null ? v.esm : v.esm1, esm2:v.esm2, esm3:v.esm3, combined:v.combined,
+      priority:severeFoldConsequence(v) ? 'TOP' : (v.priority || null),
+    };
+  }
+  function normalizePrimaryVariant(v, model, index){
+    const copy = {...v};
+    const resolved = resolvedResidue(copy, model);
+    copy.resi = resolved.resi;
+    if (copy.resi != null){
+      copy.ref = referenceAaAt(copy, copy.resi, copy.ref || resolved.parsed.ref || '');
+      copy.alt = copy.alt || resolved.parsed.alt || null;
+      if (!aaFromVariantLabel(copy.variant).resi || /^\d+\s+[ACGTN-]+>[ACGTN-]+$/i.test(String(copy.variant||'')))
+        copy.variant = proteinVariantLabel(copy, copy.resi, copy.ref, copy.alt);
+    }
+    if (severeFoldConsequence(copy)) copy.priority = 'TOP';
+    if (!copy.id) copy.id = 'fp'+index;
+    return copy;
+  }
+  function mergeFoldVariants(primary, fn, model){
+    const out = (primary || []).map((v,i) => normalizePrimaryVariant(v, model, i));
+    const byKey = new Map();
+    out.forEach(v => { const key = foldVariantKey(v); if (key) byKey.set(key, v); });
+    ((fn && fn.variants) || []).forEach((fv, i) => {
+      const normalized = normalizeFunctionVariant(fv, i, model);
+      if (!normalized) return;
+      const key = foldVariantKey(normalized);
+      const existing = key ? byKey.get(key) : null;
+      if (existing){
+        if (!usableDomainText(existing.domain) && usableDomainText(normalized.domain)) existing.domain = normalized.domain;
+        if (existing.resi == null && normalized.resi != null) existing.resi = normalized.resi;
+        if ((!existing.variant || /^\d+\s/.test(existing.variant)) && normalized.variant) existing.variant = normalized.variant;
+        if (severeFoldConsequence(normalized)) existing.priority = 'TOP';
+        return;
+      }
+      if (normalized.resi != null || severeFoldConsequence(normalized)){
+        out.push(normalized);
+        if (key) byKey.set(key, normalized);
+      }
+    });
+    return out.sort((a,b) => {
+      const ar = plausibleResidue(a.resi), br = plausibleResidue(b.resi);
+      if (ar == null && br == null) return (finiteNumber(a.pos)||0) - (finiteNumber(b.pos)||0);
+      if (ar == null) return 1; if (br == null) return -1;
+      return ar - br || ((finiteNumber(a.pos)||0) - (finiteNumber(b.pos)||0));
+    });
+  }
+
+  /* Detect a likely C-terminally truncated structure by comparing the model's
+     residue count with protein-residue positions present in the coding-variant
+     list. We intentionally use the normalized residue positions, not genomic
+     coordinates. A warning is shown only when at least one coding variant lies
+     beyond the final modeled residue. */
+  function detectStructureTruncation(){
+    const structureLength = FD.struct ? finiteNumber(FD.struct.length) : null;
+    if (structureLength == null || structureLength < 1){ FD.truncation = null; return null; }
+    const beyond = (FD.variants || []).map(v=>({v, resi:finiteNumber(v.resi)}))
+      .filter(x=>x.resi != null && x.resi >= 1 && Math.floor(x.resi) === x.resi && x.resi > structureLength);
+    if (!beyond.length){ FD.truncation = null; return null; }
+    const maxVariantResidue = Math.max(...beyond.map(x=>x.resi));
+    const src = STRUCT_SOURCES.find(x=>x.key===FD.structSource);
+    FD.truncation = {
+      structureLength,
+      maxVariantResidue,
+      beyondCount:beyond.length,
+      sourceLabel:(src && src.label) || 'The selected structure model',
+    };
+    return FD.truncation;
+  }
+  function truncationWarningHTML(){
+    const t = FD.truncation;
+    if (!t) return '';
+    return `<div class="fold-trunc-warning" role="alert">
+      <div class="fold-trunc-icon" aria-hidden="true">⚠</div>
+      <div><b>Possible truncated protein structure</b>
+        <div>${escFold(t.sourceLabel)} contains <b>${t.structureLength}</b> modeled amino acids, but the coding-variant list extends to residue <b>${t.maxVariantResidue}</b>${t.beyondCount>1?` (${t.beyondCount} variants fall beyond the model)`:''}. The structure prediction method most likely truncated this protein. Check the other structure models above for a more complete protein prediction.</div>
+      </div>
+    </div>`;
+  }
 
   /* ---------- active dataset detection ---------- */
   function nonEmpty(v){ return v != null && v !== ''; }
@@ -250,20 +699,29 @@
   }
 
   /* ---------- structural context for a residue ---------- */
-  function domainAt(resi){
+  function domainAt(resi, variant){
     const ds = FD.struct.domains || [];
-    return ds.find(d=>d.kind==='domain' && resi>=d.start && resi<=d.end)
-        || ds.find(d=>resi>=d.start && resi<=d.end) || null;
+    const r = finiteNumber(resi);
+    const structural = r == null ? null
+      : (ds.find(d=>d.kind==='domain' && r>=d.start && r<=d.end)
+        || ds.find(d=>r>=d.start && r<=d.end) || null);
+    return structural || domainFromText(variant && variant.domain);
   }
   function ctxFor(v){
-    const i = v.resi-1;
+    const r = finiteNumber(v.resi);
+    const i = r == null ? -1 : r-1;
     const inModel = FD.struct.plddt && i>=0 && i<FD.struct.plddt.length;
     const plddt = inModel ? FD.struct.plddt[i] : null;
     const ss = inModel && FD.struct.ss && FD.struct.ss[i] ? FD.struct.ss[i] : 'C';
-    return { plddt, ss, ssLabel:SS_LABEL[ss], domain: inModel ? domainAt(v.resi) : null, inModel };
+    return { plddt, ss, ssLabel:SS_LABEL[ss], domain:domainAt(r, v), inModel };
   }
   function interpret(v, c){
     if (!c.inModel){
+      if (finiteNumber(v.resi) == null){
+        const where = v.pos != null ? ` at genomic position ${v.pos}` : '';
+        const tone = v.consClass === 'lof' ? 'lof' : 'mid';
+        return [tone, `${v.consequence}${where} — the VCF does not provide a protein residue, so it is listed but cannot be placed on the structure.`];
+      }
       return ['mid', `Residue ${v.resi} is outside the modeled region (1–${FD.struct.length} aa) — shown in the list, but not placed on the structure.`];
     }
     const inDom = c.domain && c.domain.kind==='domain';
@@ -289,6 +747,17 @@
   }
 
   /* =================== RENDER =================== */
+  function modelPrefRadios(){
+    const opts = [{ key:'best', label:'Best' }, ...STRUCT_SOURCES.map(s=>({ key:s.key, label:s.label }))];
+    return `<div class="fold-model-pref" role="radiogroup" aria-label="Structure model">
+      <span style="font-size:10.5px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.4px">Model</span>
+      ${opts.map(o => `<label class="fold-model-opt">
+        <input type="radio" name="foldModelPref" value="${o.key}" ${FD.modelPref===o.key?'checked':''}
+          onchange="FOLD.setModelPref('${o.key}')"> ${o.label}
+      </label>`).join('')}
+    </div>`;
+  }
+
   function searchBar(){
     return `<div class="card pad" style="margin-bottom:16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
       <span style="font-size:10.5px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.4px">Gene model</span>
@@ -296,6 +765,7 @@
         style="flex:1;min-width:280px;border:1px solid var(--line);border-radius:9px;padding:9px 11px;font-family:var(--mono);font-size:13px"
         onkeydown="if(event.key==='Enter')FOLD.loadGene()">
       <button class="btn" onclick="FOLD.loadGene()">Load structure</button>
+      ${modelPrefRadios()}
     </div>`;
   }
 
@@ -331,6 +801,11 @@
     FD.sec = hasSecondaryScores(FD.dataset);
 
     const requestedGene = (typeof S !== 'undefined' && S && S.foldGene) ? S.foldGene : null;
+    /* Optional site to highlight, e.g. the "fold ↗" link on a SNPVersity row.
+       Consumed here so a stale request never leaks into a later visit. */
+    const requestedVariant = (typeof S !== 'undefined' && S && S.foldVariant) ? S.foldVariant : null;
+    if (requestedVariant && typeof S !== 'undefined' && S) S.foldVariant = null;
+    if (requestedVariant) FD.pendingVariant = requestedVariant;
 
     if (requestedGene){
       /* came from another tool — honor the explicit request and autoload */
@@ -339,10 +814,13 @@
         FD.gene = requestedGene;
         FD.selId = null;
         FD.openCarrier = null;
-        await loadStructure();
+        await loadStructure();   // applies FD.pendingVariant once variants arrive
       } else {
-        /* same gene already loaded — just re-show it */
+        /* Same gene already loaded — re-show it and just move the selection.
+           No structure fetch, no variant query, no HDF5 round-trip: clicking
+           several "fold" links on one gene costs nothing after the first. */
         reshowLoaded();
+        applyPendingVariant();
       }
       return;
     }
@@ -350,9 +828,105 @@
     /* came from the side-panel menu */
     if (FD.loaded){
       reshowLoaded();            // preserve the rendered page, don't reload
+      applyPendingVariant();
       return;
     }
     renderLanding();             // first visit from the menu: no autoload
+  }
+
+  /* =================== incoming variant selection ===================
+     Another tool (SNPVersity) can name a specific site alongside the gene. The
+     descriptor is loose on purpose — genomic position, alleles, and/or a protein
+     substitution — so we match on whatever is most specific and available. */
+  function normSub(s){ return String(s==null?'':s).replace(/^p\./i,'').replace(/[()\s]/g,'').toUpperCase(); }
+  function matchFoldVariant(req){
+    const list = FD.variants || [];
+    if (!req || !list.length) return null;
+
+    /* 1 · an explicit SNPFold variant id wins outright */
+    if (req.id != null){
+      const byId = list.find(v => String(v.id) === String(req.id));
+      if (byId) return byId;
+    }
+
+    /* 2 · genomic position (+ alleles when several records share a position) */
+    const pos = finiteNumber(req.pos);
+    if (pos != null){
+      const here = list.filter(v => finiteNumber(v.pos) === pos);
+      if (here.length === 1) return here[0];
+      if (here.length > 1){
+        const ref = String(req.ref || '').toUpperCase();
+        const alt = String(req.alt || '').toUpperCase();
+        const exact = here.find(v =>
+          String(v.refNt != null ? v.refNt : '').toUpperCase() === ref &&
+          String(v.altNt != null ? v.altNt : '').toUpperCase() === alt);
+        if (exact) return exact;
+        return here[0];
+      }
+    }
+
+    /* 3 · protein substitution, e.g. "A123T" — compare against the printed
+           label and against ref+resi+alt, since notations differ between tools */
+    const sub = normSub(req.sub || req.variant);
+    if (sub){
+      const bySub = list.find(v =>
+        normSub(v.variant) === sub ||
+        normSub(`${v.ref||''}${v.resi}${v.alt||''}`) === sub);
+      if (bySub) return bySub;
+
+      /* fall back to the residue number alone, if the substitution carries one */
+      const m = sub.match(/(\d+)/);
+      if (m){
+        const resi = Number(m[1]);
+        const byResi = list.find(v => finiteNumber(v.resi) === resi);
+        if (byResi) return byResi;
+      }
+    }
+    return null;
+  }
+
+  /* Select FD.pendingVariant against the variants currently in memory. Purely a
+     view operation: it re-renders the track, table, and context panel and moves
+     the 3D camera — it never refetches. */
+  function applyPendingVariant(){
+    const req = FD.pendingVariant;
+    FD.pendingVariant = null;
+    if (!req) return;
+
+    const v = matchFoldVariant(req);
+    if (!v){
+      const label = req.sub || req.variant || (req.pos != null ? `position ${req.pos}` : 'that variant');
+      foldNotice(`${escFold(label)} is not among the coding variants SNPFold has for ${escFold(FD.gene)}.`);
+      return;
+    }
+
+    FD.selId = v.id;
+    refreshSelection();
+    focusResidue(true);
+    scrollToSelectedRow();
+  }
+
+  function scrollToSelectedRow(){
+    if (!FD.root) return;
+    const run = () => {
+      const row = FD.root.querySelector('tr.fold-row.sel');
+      if (row && typeof row.scrollIntoView === 'function'){
+        row.scrollIntoView({ behavior:'smooth', block:'center' });
+      }
+    };
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run); else run();
+  }
+
+  /* small dismissible bar at the top of the tool — used when a handoff cannot be honored */
+  function foldNotice(html){
+    if (!FD.root) return;
+    const old = FD.root.querySelector('.fold-notice');
+    if (old) old.remove();
+    const bar = document.createElement('div');
+    bar.className = 'fold-notice';
+    bar.innerHTML = `<span>${html}</span><button type="button" title="Dismiss">×</button>`;
+    bar.querySelector('button').onclick = () => bar.remove();
+    FD.root.insertBefore(bar, FD.root.firstChild);
   }
 
   /* re-show the already-rendered content without refetching */
@@ -383,6 +957,7 @@
      FD.root. Used both for autoload-from-tool and for explicit user loads. */
   async function loadStructure(){
     FD.viewer = null;
+    FD.truncation = null;
     FD.loaded = true;               // commit to the loaded view (keep across navigation)
     FD.loadedGene = FD.gene;
 
@@ -390,20 +965,39 @@
 
     FD.root.innerHTML = header + `<div class="loading" style="padding:48px;text-align:center">
       <div class="spinner"></div><div>Loading model for ${FD.gene}…</div></div>`;
-    try { await Data.ensureStructure(FD.gene); } catch (e){ /* no file for this gene */ }
 
-    FD.struct = Data.structureFor(FD.gene);
-    FD.pdb    = Data.pdbFor(FD.gene);
+    FD.structSource = null;
+    let matched = null;
+    try { matched = await resolveStructureSource(FD.gene, FD.modelPref); } catch (e){ /* no file for this gene in the checked folder(s) */ }
 
-    if (!FD.struct){
+    FD.struct = matched ? matched.data.struct : null;
+    FD.pdb    = matched ? matched.data.pdb    : null;
+    FD.pdbResidueMap = null;
+
+    if (!FD.struct || !matched){
+      const checked = (!FD.modelPref || FD.modelPref === 'best')
+        ? STRUCT_SOURCES
+        : STRUCT_SOURCES.filter(s => s.key === FD.modelPref);
+      const folderList = checked.map(s => `<span class="c-mono">data/structures/${s.key}/</span>`)
+        .join(checked.length > 1 ? ', ' : '');
+      const whatWasChecked = checked.length > 1
+        ? `checked ${folderList} for a structure file for this gene and found none of them`
+        : `checked ${folderList} for a structure file for this gene and didn't find one`;
+      const modelNote = (!FD.modelPref || FD.modelPref === 'best')
+        ? ''
+        : ` You have <b>${STRUCT_SOURCES.find(s=>s.key===FD.modelPref)?.label}</b> selected specifically —
+           switch to <b>Best</b> above to let SNPFold fall back to the other model sources.`;
       FD.root.innerHTML = datasetChooser() + searchBar() + `<div class="empty-state"><div class="ei">${ICONS.fold}</div>
         <h3>No predicted model for “${FD.gene}”</h3>
-        <p>SNPFold loads a protein model from <span class="c-mono">structure-&lt;gene&gt;.js</span>.
-        Search another gene model above, or generate its structure file and drop it in
-        <span class="c-mono">js/structures/</span>.</p></div>`;
+        <p>SNPFold ${whatWasChecked}. This usually means the protein wasn't modeled — most
+        likely because it's part of a complex or its sequence is too long to fold.${modelNote}
+        Search another gene model above, or generate its structure file and drop it in one
+        of those folders.</p></div>`;
+      FD.pendingVariant = null;     // nothing to select without a model
       if (typeof attachTT==='function') attachTT();
       return;
     }
+    FD.structSource = matched.src.key;
     const s = FD.struct;
     const plddtValues = Array.isArray(s.plddt) ? s.plddt.map(finiteNumber).filter(v => v != null) : [];
     const meanP = plddtValues.length
@@ -421,7 +1015,17 @@
         : Promise.resolve(null);
 
       const [variants, fn] = await Promise.all([variantsPromise, functionPromise]);
-      FD.variants = variants || [];
+      const [geneModel, domainRecords] = await Promise.all([
+        loadFoldGeneModel(fn),
+        loadCanonicalDomainRecords(fn),
+      ]);
+
+      /* Use canonical protein-coordinate domains even when the full-panel variant
+         query fails, and convert genomic LOF positions through the canonical CDS
+         before drawing the residue lollipop. */
+      mergeCanonicalDomains(fn, domainRecords);
+      FD.variants = mergeFoldVariants(variants, fn, geneModel);
+      detectStructureTruncation();
 
       /* If the app state did not expose the dataset, actual returned 2026 score fields
          still enable the extra columns. */
@@ -441,11 +1045,12 @@
       FD.variants = [];
       FD.carriers = null;
       FD.locus = null;
+      FD.truncation = null;
     }
 
     FD.root.innerHTML = datasetChooser() + searchBar() + `
       <div class="sec"><div class="bar"></div><div>
-        <div class="n">STRUCTURE-AWARE INTERPRETATION · AlphaFold + PlantCAD/ESM</div>
+        <div class="n">STRUCTURE-AWARE INTERPRETATION · ${STRUCT_SOURCES.find(x=>x.key===FD.structSource)?.label || 'Predicted structure'} + PlantCAD/ESM</div>
         <h2>See where variants, domains, and local structure align</h2>
         <p>Coding variants mapped onto the predicted protein. Read each change against its
         Pfam domain, secondary structure, and local model confidence (pLDDT) — in a linear
@@ -454,12 +1059,14 @@
 
       <div class="fold-context">
         <span class="g"><b class="mono">${s.gene}</b></span>
+        ${structSourceBadge()}
         ${s.title?`<span class="dot">·</span><span>${s.title}</span>`:''}
         <span class="dot">·</span><span><b>${s.length}</b> aa</span>
         ${s.uniprot?`<span class="dot">·</span><span>UniProt <a href="https://www.uniprot.org/uniprotkb/${s.uniprot}" target="_blank" rel="noopener">${s.uniprot}</a></span>`:''}
         <span class="dot">·</span><span>mean pLDDT <b>${meanP}</b></span>
         <span class="dot">·</span><span><b>${FD.variants.length}</b> coding variants</span>
       </div>
+      ${truncationWarningHTML()}
 
       <!-- linear protein browser -->
       <div class="sec" style="margin-top:24px"><div class="bar"></div><div><h2 style="font-size:16px">Protein browser</h2>
@@ -499,6 +1106,7 @@
               <button class="seg-b ${FD.colorMode==='impact'?'on':''}" onclick="FOLD.color('impact')">Variant impact</button>
             </div>
             <label class="chk"><input type="checkbox" ${FD.showVar?'checked':''} onchange="FOLD.toggleVar(this.checked)"> Variant residues</label>
+            <span style="margin-left:auto">${structSourceBadge()}</span>
             <button class="btn ghost" onclick="FOLD.reset()">Reset view</button>
           </div>
           <div id="fold3d" class="fold-3d"></div>
@@ -522,6 +1130,7 @@
     `;
     buildViewer();
     if (typeof attachTT==='function') attachTT();
+    applyPendingVariant();          // honor an incoming "show me this site" request
   }
 
   /* ---------- linear track ---------- */
@@ -566,14 +1175,31 @@
     // domains
     (s.domains||[]).forEach((d,i)=>{
       const x1=x(d.start), x2=x(d.end), w=x2-x1, mid=x1+w/2;
+      const label = escFold([d.name, d.pfam].filter(Boolean).join(' · '));
       if (d.kind==='region'){
         g+=`<rect x="${x1.toFixed(1)}" y="${domY+3}" width="${w.toFixed(1)}" height="${domH-6}" rx="3" fill="#eef1f6" stroke="#d3dae6" stroke-dasharray="3 2"/>`;
-        g+=`<text x="${mid.toFixed(1)}" y="${domY+domH-4}" class="dlab" text-anchor="middle">${d.name}</text>`;
+        g+=`<text x="${mid.toFixed(1)}" y="${domY+domH-4}" class="dlab" text-anchor="middle">${label}</text>`;
       } else {
         g+=`<rect x="${x1.toFixed(1)}" y="${domY}" width="${w.toFixed(1)}" height="${domH}" rx="5" fill="${DOM_FILL[i%DOM_FILL.length]}" stroke="#bcd0f5"/>`;
-        g+=`<text x="${mid.toFixed(1)}" y="${domY+domH-5}" class="dlab" text-anchor="middle">${d.name} · ${d.pfam}</text>`;
+        g+=`<text x="${mid.toFixed(1)}" y="${domY+domH-5}" class="dlab" text-anchor="middle">${label}</text>`;
       }
     });
+    /* If the canonical interval file has no matching key, SNPVersity's
+       per-variant domain hit still appears at the converted residue as a
+       narrow dashed marker. This shows a position-supported hit without
+       inventing unsupported domain boundaries. */
+    if (!(s.domains||[]).length){
+      const seenHits = new Set();
+      (FD.variants||[]).forEach(v=>{
+        const resi=plausibleResidue(v.resi), text=usableDomainText(v.domain);
+        if (resi==null || resi>N || !text) return;
+        const key=resi+'|'+text; if (seenHits.has(key)) return; seenHits.add(key);
+        const xx=x(resi), label=escFold(text);
+        g+=`<g data-tt="${label} · domain hit at residue ${resi}">`;
+        g+=`<rect x="${(xx-4).toFixed(1)}" y="${domY}" width="8" height="${domH}" rx="3" fill="#fff" stroke="#6d7fa7" stroke-width="1.4" stroke-dasharray="2 1"/>`;
+        g+=`<text x="${xx.toFixed(1)}" y="${domY+domH+10}" class="dlab" text-anchor="middle">${label}</text></g>`;
+      });
+    }
 
     // ruler ticks
     for (let r=1;r<=N;r+=100){ const xx=x(r);
@@ -584,17 +1210,20 @@
 
     // selection guide
     const sel = FD.variants.find(v=>v.id===FD.selId);
-    if (sel && sel.resi>=1 && sel.resi<=N){ const xx=x(sel.resi); g+=`<line x1="${xx.toFixed(1)}" y1="${lolliTop}" x2="${xx.toFixed(1)}" y2="${pY+pH}" stroke="#13264a" stroke-dasharray="2 2" opacity=".5"/>`; }
+    const selResi = sel ? plausibleResidue(sel.resi) : null;
+    if (selResi != null && selResi<=N){ const xx=x(selResi); g+=`<line x1="${xx.toFixed(1)}" y1="${lolliTop}" x2="${xx.toFixed(1)}" y2="${pY+pH}" stroke="#13264a" stroke-dasharray="2 2" opacity=".5"/>`; }
 
     // lollipops
     FD.variants.forEach(v=>{
-      if (v.resi<1 || v.resi>N) return;   // can't place variants outside the model
-      const xx=x(v.resi);
-      const sev=v.combined!=null?Math.min(maxSev, Math.abs(v.combined)):maxSev*0.5;
+      const resi = plausibleResidue(v.resi);
+      if (resi == null || resi>N) return;   // only protein residues can be placed
+      const xx=x(resi);
+      const sev=severeFoldConsequence(v) ? maxSev
+        : (v.combined!=null?Math.min(maxSev, Math.abs(v.combined)):maxSev*0.5);
       const head=base - 6 - (sev/maxSev)*(lolliH-10);
       const col=CONS_FILL[v.consClass]||'#2f5bbf';
       const on=v.id===FD.selId;
-      g+=`<g class="lolli ${on?'on':''}" onclick="FOLD.select('${v.id}')" data-tt="${v.variant} · ${v.consequence} · res ${v.resi}">`;
+      g+=`<g class="lolli ${on?'on':''}" onclick="FOLD.select('${v.id}')" data-tt="${v.variant} · ${v.consequence} · residue ${resi}">`;
       g+=`<line x1="${xx.toFixed(1)}" y1="${base}" x2="${xx.toFixed(1)}" y2="${head.toFixed(1)}" stroke="${col}" stroke-width="${on?2:1.4}"/>`;
       g+=`<circle cx="${xx.toFixed(1)}" cy="${head.toFixed(1)}" r="${on?6:4.5}" fill="${col}" stroke="#fff" stroke-width="1.5"/>`;
       if (v.consClass==='lof') g+=`<text x="${xx.toFixed(1)}" y="${(head-8).toFixed(1)}" class="vlab" text-anchor="middle">✱</text>`;
@@ -627,7 +1256,7 @@
      `sec` marks the MaizeGDB-2026-only columns, so the header and the row markup
      stay in sync automatically. `desc1` = first click sorts high→low, which reads
      better for counts/ranks; everything else starts low→high. */
-  const PRIO_RANK = { high:3, moderate:2, medium:2, low:1, modifier:0 };
+  const PRIO_RANK = { top:4, high:3, moderate:2, medium:2, low:1, modifier:0 };
   const FOLD_COLS = [
     { key:'variant',     label:'Variant',     type:'str',
       get:v => v.variant },
@@ -708,7 +1337,7 @@
     return `<tr class="fold-row ${on?'sel':''}" onclick="FOLD.select('${v.id}')">
       <td class="c-mono c-alt" style="padding-left:11px">${v.variant}</td>
       <td><span class="cons ${v.consClass}">${v.consequence}</span>${peJump(v)}</td>
-      <td class="num">${v.resi}</td>
+      <td class="num">${finiteNumber(v.resi)==null?'<span style="color:var(--faint)">—</span>':v.resi}</td>
       <td>${c.domain ? (c.domain.kind==='domain'?`<span class="dom-tag">${c.domain.name}</span>`:`<span style="color:var(--muted);font-size:11px">${c.domain.name}</span>`) : '<span style="color:var(--faint)">—</span>'}</td>
       <td class="num">${c.plddt==null?'<span style="color:var(--faint)">—</span>':`<span class="plddt-chip" style="background:${plddtHex(c.plddt)};color:${c.plddt>=70?'#06294f':'#5c3a06'}">${c.plddt.toFixed(0)}</span>`}</td>
       <td>${c.inModel?`<span class="ss-chip ss-${c.ss}">${c.ssLabel}</span>`:'<span style="color:var(--faint)">—</span>'}</td>
@@ -805,7 +1434,7 @@
       </div>
       <div class="interp ${tone}">${msg}</div>
       <div class="ctx-grid">
-        <div class="ck"><div class="kk">Residue</div><div class="vv mono">${v.ref||''}${v.resi}${v.consClass==='missense'&&v.alt?v.alt:''}</div></div>
+        <div class="ck"><div class="kk">Residue</div><div class="vv mono">${finiteNumber(v.resi)==null?'—':`${v.ref||''}${v.resi}${v.consClass==='missense'&&v.alt?v.alt:''}`}</div></div>
         <div class="ck"><div class="kk">Domain</div><div class="vv">${c.domain?c.domain.name:'—'}${c.domain&&c.domain.pfam&&c.domain.pfam!=='region'?` <span class="muted mono">${c.domain.pfam}</span>`:''}</div></div>
         <div class="ck"><div class="kk">Local confidence</div><div class="vv">${c.plddt==null?'<span class="muted">outside model</span>':`<span class="plddt-chip" style="background:${plddtHex(c.plddt)};color:${c.plddt>=70?'#06294f':'#5c3a06'}">${c.plddt.toFixed(0)}</span> <span class="muted">${plddtBand(c.plddt)}</span>`}</div></div>
         <div class="ck"><div class="kk">Secondary structure</div><div class="vv"><span class="ss-chip ss-${c.ss}">${c.ssLabel}</span></div></div>
@@ -877,20 +1506,24 @@
     }
     if (FD.showVar){
       FD.variants.forEach(vr=>{
+        const resi = plausibleResidue(vr.resi);
+        if (resi==null || !FD.struct || resi>FD.struct.length) return;
         const col = FD.colorMode==='impact' ? impactHex(vr.combined) : (CONS_FILL[vr.consClass]||'#2f5bbf');
-        v.addStyle({ resi:vr.resi }, { stick:{ radius:.18 } });
-        v.addStyle({ resi:vr.resi }, { sphere:{ scale: vr.id===FD.selId ? 0.7 : 0.45, color: col } });
+        v.addStyle({ resi }, { stick:{ radius:.18 } });
+        v.addStyle({ resi }, { sphere:{ scale: vr.id===FD.selId ? 0.7 : 0.45, color: col } });
       });
     }
     v.render();
   }
   function focusResidue(animate){
     const v=FD.variants.find(x=>x.id===FD.selId); if(!FD.viewer||!v) return;
+    const resi = plausibleResidue(v.resi);
+    if (resi==null || !FD.struct || resi>FD.struct.length) return;
     FD.viewer.removeAllLabels();
-    FD.viewer.addLabel(v.variant, { position:{ resi:v.resi }, backgroundColor:'#13264a', backgroundOpacity:.9,
-      fontColor:'white', fontSize:11, borderThickness:0 }, { resi:v.resi });
+    FD.viewer.addLabel(v.variant, { position:{ resi }, backgroundColor:'#13264a', backgroundOpacity:.9,
+      fontColor:'white', fontSize:11, borderThickness:0 }, { resi });
     applyStyle();
-    FD.viewer.zoomTo({ resi:v.resi }, animate?500:0);
+    FD.viewer.zoomTo({ resi }, animate?500:0);
     FD.viewer.render();
   }
 
@@ -967,6 +1600,12 @@
     focus(){ focusResidue(true); },
     loadGene(){ const el=document.getElementById('foldGeneInput'); if(!el)return;
       const g=el.value.trim(); if(!g)return; FD.gene=g; FD.selId=null; FD.openCarrier=null; loadStructure(); },
+    /* Best/AlphaFold2/Boltz2/ESMFold radio — reload the current gene's structure under
+       the new preference if one is already loaded, otherwise just record the choice. */
+    setModelPref(pref){
+      FD.modelPref = pref;
+      if (FD.loaded) loadStructure();
+    },
     setDataset(dataset){ FD.dataset=dataset; if(typeof S!=='undefined'&&S)S.dataset=datasetId(dataset); FD.sec=hasSecondaryScores(dataset);
       if(FD.loaded) loadStructure(); else renderLanding(); },
     /* compact dataset chooser on this page — select which dataset to use directly */
@@ -1003,6 +1642,18 @@
       .fold-table th.fold-th:hover .fold-ar{opacity:.7}
       .fold-table th.fold-th.sorted{background-color:rgba(100,100,100,.75)}
       .fold-table th.fold-th.sorted .fold-ar{opacity:1}
+      /* handoff notice (e.g. a requested variant is not in this gene's table) */
+      .fold-notice{display:flex;align-items:center;gap:10px;background:#fffaf0;border:1px solid #f0dcb4;
+        color:#8a6d1e;border-radius:9px;padding:8px 12px;font-size:12.5px;margin-bottom:12px}
+      .fold-notice button{margin-left:auto;border:0;background:none;color:inherit;font-size:16px;
+        line-height:1;cursor:pointer;padding:0 2px}
+      /* Persistent warning when normalized protein variants extend beyond the loaded model. */
+      .fold-trunc-warning{display:flex;align-items:flex-start;gap:11px;background:#fff8e8;
+        border:1px solid #e9c86c;border-left:4px solid #d99a16;color:#6f5012;border-radius:9px;
+        padding:11px 14px;margin:12px 0 18px;font-size:12.5px;line-height:1.5}
+      .fold-trunc-warning b{color:#62430a}
+      .fold-trunc-icon{font-size:18px;line-height:1.2;flex:0 0 auto}
+      .snpfold-root .prio.top{background:#fde2df;color:#9f2018;border-color:#efb8b1}
       .fold-cbtn{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:7px;overflow:hidden;background:#fff;cursor:pointer;padding:0}
       .fold-cbtn:hover{border-color:#c3cee0}
       .fold-cbtn.on{border-color:#9db4dd;box-shadow:0 0 0 2px rgba(47,106,208,.12)}
@@ -1033,7 +1684,22 @@
       .fold-ds.sel .fold-ds-dot{border-color:#2f6ad0;background:#2f6ad0;box-shadow:inset 0 0 0 2px #fff}
       .fold-ds-txt{display:flex;flex-direction:column;line-height:1.25;min-width:0}
       .fold-ds-name{font-weight:600;font-size:13px;color:var(--ink)}
-      .fold-ds-sub{font-size:11.5px;color:var(--muted)}`;
+      .fold-ds-sub{font-size:11.5px;color:var(--muted)}
+      /* structure-source badge (AlphaFold2 vs Boltz2 vs ESMFold) shown in the gene context line */
+      .fold-src-badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;
+        padding:2px 9px 2px 7px;border-radius:999px;letter-spacing:.2px;vertical-align:middle}
+      .fold-src-dot{width:7px;height:7px;border-radius:50%;flex:0 0 auto}
+      .fold-src-badge.alphafold{background:#eaf1fd;color:#1a4fa0}
+      .fold-src-badge.alphafold .fold-src-dot{background:#2f6ad0}
+      .fold-src-badge.boltz{background:#fdeeea;color:#a03d1a}
+      .fold-src-badge.boltz .fold-src-dot{background:#d0682f}
+      .fold-src-badge.esmfold{background:#eafaf0;color:#0f7a45}
+      .fold-src-badge.esmfold .fold-src-dot{background:#22a35f}
+      /* Best / AlphaFold2 / Boltz2 / ESMFold model picker in the search bar */
+      .fold-model-pref{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-left:6px}
+      .fold-model-opt{display:inline-flex;align-items:center;gap:4px;font-size:12.5px;color:var(--ink);
+        cursor:pointer;white-space:nowrap}
+      .fold-model-opt input{accent-color:#2f6ad0;cursor:pointer}`;
     document.head.appendChild(s);
   }
 

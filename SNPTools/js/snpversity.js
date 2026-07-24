@@ -607,7 +607,11 @@ function injectVersityCSS(){
     .upl-bad .mono,.upl-note .mono,.upl-name .mono{font-family:var(--mono)}
     .from-fn{background:#eef4ff;border:1px solid #cfe0ff;color:#274b8f;border-radius:9px;padding:9px 12px;
       font-size:12.5px;margin-bottom:12px;display:flex;gap:9px;align-items:center;flex-wrap:wrap}
-    .from-fn .mono{font-family:var(--mono)}`;
+    .from-fn .mono{font-family:var(--mono)}
+    /* per-row jump links in the Effect column (matches .pe-jump) */
+    .effect-cell .fold-jump{font-size:11px;white-space:nowrap;margin-left:2px;
+      color:#176c3a;text-decoration:none;border-bottom:1px dotted #9ecdb1}
+    .effect-cell .fold-jump:hover{color:#0f4f2a;border-bottom-style:solid}`;
   document.head.appendChild(s);
 }
 
@@ -691,7 +695,6 @@ function renderResults(){
           <button class="btn" onclick="sendToImpact()">${ICONS.star||''} Send to SNPImpact</button>
           <button class="btn" onclick="sendToCompare()">${ICONS.compare||ICONS.grid||''} Send to SNPCompare</button>
           <button class="btn" onclick="sendToTree()">${ICONS.tree} Send data to SNPTree</button>
-          <button class="btn" onclick="sendToMatrix()">${ICONS.grid||ICONS.tree||''} Send to SNPMatrix</button>
           <button class="btn" onclick="openPangenomeRegion()">${ICONS.grid||''} Pangenome viewer ↗</button>
           <button class="btn" onclick="downloadVCF()">${ICONS.download} Download VCF</button>
         </div>
@@ -812,7 +815,7 @@ function renderTable(){
     <div class="tbl-wrap"><table class="vcf">
       <thead><tr>
         <th>CHR</th><th>POS</th><th class="num">REF</th><th class="num">ALT</th>
-        <th>Gene model</th><th>Effect</th><th>Impact</th><th>Domain</th>
+        <th>Gene model</th><th>Effect</th><th>SNPEff Impact</th><th>Domain</th>
         <th class="num">MQ</th><th class="num">COMP</th><th class="num">maxR²</th><th class="num">MAF</th>
         <th class="num">PlantCAD1</th><th class="num">PlantCAD2</th><th class="num">ESM1</th><th class="num">ESM2</th><th class="num">ESM3</th>
         ${accs.map(a=>`<th class="acc-th" style="height:${thH}px" title="${escAttr((a.projTitle||a.proj||'')+' — '+a.id)}"><span class="proj-bar" style="background:${a.projColor};height:8px" title="${escAttr(a.projTitle||a.proj||'')}"></span><span class="v">${a.id}</span></th>`).join('')}
@@ -833,19 +836,29 @@ function renderTable(){
 }
 function rowHTML(r){
   const lo=r.pos-10000,hi=r.pos+10000;
-  const link=`https://jbrowse.maizegdb.org/?data=B73&loc=${S.chr}:${lo}..${hi}&highlight=${S.chr}:${lo}..${hi}`;
-  const isMis = /missense/i.test(r.effect||'');
-  const peJump = (isMis && r.gene && r.gene!=='—')
+  const link=`https://jbrowse.maizegdb.org/?data=B73&loc=${S.chr}:${lo}..${hi}&highlight=${S.chr}:${r.pos}..${r.pos}`;
+  const effectText = String(r.effect||'');
+  const isMis = /missense/i.test(effectText);
+  const isSyn = /synonymous/i.test(effectText) && !/non[-_ ]?synonymous/i.test(effectText);
+  const isFoldCoding = /missense|protein[_ -]?altering|non[_ -]?synonymous|stop[_ -]?gained|nonsense|frameshift|start[_ -]?lost|initiator[_ -]?codon|stop[_ -]?lost|inframe[_ -]?(insertion|deletion)/i.test(effectText);
+  const hasGene = r.gene && r.gene!=='—';
+  const peJump = (isMis && hasGene)
     ? ` <a class="pe-jump" href="#" title="View this substitution in PanEffect" onclick="goPanEffect('${r.gene}',{variant:'${escAttr(r.sub||'')}'});return false;">effects ↗</a>`
     : '';
-  const eff = (r.sub?`<span class="sub">(${r.sub})</span> ${r.effect}`:r.effect) + peJump;
+  /* SNPFold: residue-level coding changes and severe LOF changes get a structure
+     link. The genomic position/alleles are also passed so stop-gained records can
+     still be selected when the VCF SUB field lacks a protein substitution. */
+  const foldJump = (isFoldCoding && hasGene)
+    ? ` <a class="fold-jump" href="#" title="Show this variant on the predicted protein structure in SNPFold" onclick="goFold('${r.gene}',{chr:'${escAttr(S.chr)}',pos:${r.pos},ref:'${escAttr(r.ref)}',alt:'${escAttr(r.alt)}',sub:'${escAttr(r.sub||'')}',effect:'${escAttr(r.effect||'')}'});return false;">fold ↗</a>`
+    : '';
+  const eff = (r.sub?`<span class="sub">(${r.sub})</span> ${r.effect}`:r.effect) + peJump + foldJump;
   const sc=(v)=>`<td class="score ${v===null?'na':''}" style="${v===null?'':'background:'+gColor(v)}">${v===null?'N/A':v}</td>`;
   return `<tr>
     <td class="c-mono" style="padding-left:11px">${S.chr.replace('chr','')}</td>
-    <td class="c-pos">${r.pos.toLocaleString()}</td>
+    <td class="c-pos"><a class="gene-link" href="${link}" target="_blank" rel="noopener">${r.pos.toLocaleString()}</a></td>
     <td class="c-allele c-ref" data-tt="REF allele">${r.ref}</td>
     <td class="c-allele c-alt" data-tt="ALT allele">${r.alt}</td>
-    <td><a class="gene-link" href="${link}" target="_blank" rel="noopener">${r.gene}</a></td>
+    <td>${r.gene}</td>
     <td class="effect-cell">${eff}</td>
     <td><span class="pill ${r.impact.toLowerCase()}">${r.impact}</span></td>
     <td>${domTag(r.domain)}</td>
@@ -897,8 +910,18 @@ function pangenomeRegionURL(chr, start, end, set){
 function openPangenomeRegion(){
   window.open(pangenomeRegionURL(S.chr,S.start,S.end),'_blank','noopener');
 }
-/* jump to SNPFold for a specific gene model */
-function goFold(gene){ S.foldGene=gene; go('snpfold'); }
+/* Jump to SNPFold for a specific gene model.
+   `variant` is optional: {chr,pos,ref,alt,sub,effect} (or a plain "A123T" string).
+   When present SNPFold selects that site — lollipop, table row, 3D label — after
+   the gene is shown. Passing it through state (not a reload) means clicking fold
+   links repeatedly on the same gene never re-queries the HDF5 store. */
+function goFold(gene, variant){
+  S.foldGene=gene;
+  S.foldVariant = variant
+    ? (typeof variant==='string' ? {sub:variant} : variant)
+    : null;
+  go('snpfold');
+}
 /* jump to SNPFunction (gene function & allele mining) for a specific gene */
 function goFunction(gene, dataset){ S.functionGene=gene; S.functionDataset=dataset||S.dataset; go('snpfunction'); }
 function pageBtns(pages){

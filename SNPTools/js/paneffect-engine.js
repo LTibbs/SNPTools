@@ -25,6 +25,9 @@
     installedFetch: false, origFetch: null,
     base: './paneffect/', variant: null,
     grids: { b73: null, pan: null },
+    /* last rows handed to each canvas renderer, so a colour-scheme change
+       can re-render without re-running the whole fetch pipeline */
+    lastData: { b73: null, pan: null },
   };
 
   /* ---------------- fetch rebaser -------------------------------------
@@ -78,6 +81,7 @@
   }
 
   function canvasRenderGene(data) {
+    state.lastData.b73 = data;
     var host = document.getElementById('full-heatmap');
     if (!host || !window.PanEffectHeatmap) return;
     if (state.grids.b73) { state.grids.b73.destroy(); state.grids.b73 = null; }
@@ -94,7 +98,7 @@
     var grid = PanEffectHeatmap.renderGrid(host, cells, {
       cols: gene_model_length, rows: Y_ROWS,
       cellW: window_length / gene_model_length, cellH: 14,
-      color: function (score, c) { return vis(c) ? colorScale(score) : '#FFFFFF'; },
+      color: function (score, c) { return vis(c) ? THEME.colorFor('gene', score) : '#FFFFFF'; },
       tooltip: function (c) {
         return 'Position: ' + c.x + '<br>Substitution: ' + c.wt + ' &rarr; ' +
                numberToAminoAcid(c.y) + '<br>Score: ' + c.score;
@@ -107,6 +111,7 @@
   }
 
   function canvasRenderPan(data) {
+    state.lastData.pan = data;
     var host = document.getElementById('full-heatmap-pan');
     if (!host || !window.PanEffectHeatmap) return;
     if (state.grids.pan) { state.grids.pan.destroy(); state.grids.pan = null; }
@@ -126,7 +131,7 @@
     var grid = PanEffectHeatmap.renderGrid(host, cells, {
       cols: alignment_length, rows: rows || 1,
       cellW: window_length / alignment_length, cellH: 5,
-      color: function (score, c) { return c.gap ? '#e6e6e6' : colorScalePan(score); },
+      color: function (score, c) { return c.gap ? THEME.gapColor() : THEME.colorFor('pan', score); },
       tooltip: function (c) {
         return 'B73 Position: ' + (c.x2 == null ? '' : c.x2) +
                '<br>Target Position: ' + (c.x3 == null ? '' : c.x3) +
@@ -142,19 +147,187 @@
     if (box) { box.innerHTML = ''; box.appendChild(buildLegendBar()); }
   }
 
-  /* compact horizontal score legend */
-  var LEGEND_COLORS = ['#00429d','#3860aa','#587fb3','#78a0b7','#9ac0b3','#c1e19e',
-    '#ffff00','#ffd337','#fea447','#f1784d','#db4c4d','#bd2147','#93003a'];
+  /* ================= colour theme (inlined) ==========================
+     Deliberately inlined rather than kept in a separate file: a missing
+     or 404'd <script> tag silently degraded to a no-op install(), which
+     recoloured the canvas heatmaps while leaving the zoomed views on the
+     old scheme and the toggle inert. One file, no load-order to get wrong.
+
+     Two schemes:
+       'classic'  — delegates to the real colorScale / colorScalePan from
+                    support.js, so it is byte-identical to the original.
+       'snptools' — SNPImpact's ramp from snpimpact.js scoreColor().
+
+     Sentinels (support.js) — NOT ramp values, and both schemes honour them:
+                  undefined / NaN     score === 0
+       gene       white               black   -> wild-type diagonal
+       pan        #DDDDDD             #00429d -> exact match to B73
+     ================================================================== */
+  var THEME = (function () {
+    var STORE_KEY = 'snptools.pe.scheme';
+
+    /* Confirmed against support.js: thresholds run from >0 down to <=-22
+       in steps of 2, so the scored range is exactly -22..0. */
+    var DOMAINS = {
+      impact: { lo: -12, hi: 6 },
+      gene:   { lo: -22, hi: 0 },
+      pan:    { lo: -22, hi: 0 },
+    };
+
+    /* GAP matches the '#e6e6e6' hardcoded in pan.js so the canvas and
+       zoomed pan views agree. */
+    var GAP = '#e6e6e6';
+    var NEUTRAL = {
+      classic:  { gene: { blank: 'white',   zero: 'black'   },
+                  pan:  { blank: '#DDDDDD', zero: '#00429d' } },
+      snptools: { gene: { blank: '#ffffff', zero: '#13264a' },
+                  pan:  { blank: '#DDDDDD', zero: '#2563eb' } },
+    };
+
+    var CLASSIC_COLORS = ['#00429d','#3860aa','#587fb3','#78a0b7','#9ac0b3','#c1e19e',
+      '#ffff00','#ffd337','#fea447','#f1784d','#db4c4d','#bd2147','#93003a'];
+
+    var ORIGINAL = { gene: null, pan: null };
+    var scheme = 'snptools';
+
+    function clamp01(t) { return t < 0 ? 0 : (t > 1 ? 1 : t); }
+    function snpRGB(t) {
+      t = clamp01(t);
+      var r = t < 0.5 ? 255 : Math.round(255 * (1 - (t - 0.5) * 2));
+      var g = t < 0.5 ? Math.round(255 * t * 2) : 200;
+      return [r, Math.max(60, g), 60];
+    }
+    function snpRamp(t) { var c = snpRGB(t); return 'rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')'; }
+    function snpHex(t) {
+      var c = snpRGB(t), s = '#', i;
+      for (i = 0; i < 3; i++) s += ('0' + c[i].toString(16)).slice(-2);
+      return s;
+    }
+    function classicRamp(t) {
+      return CLASSIC_COLORS[Math.round(clamp01(1 - t) * (CLASSIC_COLORS.length - 1))];
+    }
+    function tFor(kind, score) {
+      var d = DOMAINS[kind] || DOMAINS.gene;
+      return clamp01((+score - d.lo) / (d.hi - d.lo));
+    }
+
+    function colorFor(kind, score) {
+      kind = (kind === 'pan') ? 'pan' : (kind === 'impact' ? 'impact' : 'gene');
+      var nk = (kind === 'impact') ? 'gene' : kind;
+
+      /* Classic hands the raw value straight to support.js so every input —
+         including degenerate ones like NaN — behaves exactly as it always
+         has. Checking sentinels first would diverge on the edges. */
+      if (scheme === 'classic') {
+        var orig = ORIGINAL[nk];
+        if (typeof orig === 'function') {
+          try { return orig(score); } catch (e) { /* fall through */ }
+        }
+        var nc = NEUTRAL.classic[nk];
+        if (score === undefined || score === null || score === '' || isNaN(+score)) return nc.blank;
+        if (+score === 0) return nc.zero;
+        return classicRamp(tFor(kind, +score));
+      }
+
+      var n = NEUTRAL.snptools[nk];
+      if (score === undefined || score === null || score === '' || isNaN(+score)) return n.blank;
+      var v = +score;
+      if (v === 0) return n.zero;
+      return snpRamp(tFor(kind, v));
+    }
+
+    function stops(reverse) {
+      var out = [], i;
+      if (scheme === 'classic') out = CLASSIC_COLORS.slice().reverse();
+      else for (i = 0; i < 9; i++) out.push(snpHex(i / 8));
+      return reverse ? out.reverse() : out;
+    }
+    function gradientCSS(deg, reverse) {
+      var s = stops(reverse), i;
+      deg = (deg == null) ? 90 : deg;
+      if (scheme === 'classic') {
+        var parts = [], w = 100 / s.length;
+        for (i = 0; i < s.length; i++) {
+          parts.push(s[i] + ' ' + (i * w).toFixed(2) + '% ' + ((i + 1) * w).toFixed(2) + '%');
+        }
+        return 'linear-gradient(' + deg + 'deg,' + parts.join(',') + ')';
+      }
+      return 'linear-gradient(' + deg + 'deg,' + s.join(',') + ')';
+    }
+
+    /* support.js declares colorScale / colorScalePan as top-level function
+       declarations, so they are writable properties of the global object.
+       genome.js and pan.js call them BY NAME at draw time, which is why
+       re-pointing them here reaches the zoomed views too. */
+    function install() {
+      if (!ORIGINAL.gene && typeof window.colorScale === 'function' && !window.colorScale.__peTheme) {
+        ORIGINAL.gene = window.colorScale;
+      }
+      if (!ORIGINAL.pan && typeof window.colorScalePan === 'function' && !window.colorScalePan.__peTheme) {
+        ORIGINAL.pan = window.colorScalePan;
+      }
+      var gene = function (score) { return colorFor('gene', score); };
+      var pan  = function (score) { return colorFor('pan',  score); };
+      gene.__peTheme = pan.__peTheme = true;
+
+      window.colorScale = gene;
+      window.colorScalePan = pan;
+      try { colorScale = gene; colorScalePan = pan; } catch (e) { /* window write counts */ }
+
+      return window.colorScale === gene;
+    }
+
+    function getScheme() { return scheme; }
+    function setScheme(next) {
+      next = (next === 'classic') ? 'classic' : 'snptools';
+      scheme = next;
+      try { window.localStorage.setItem(STORE_KEY, scheme); } catch (e) {}
+      install();
+      return scheme;
+    }
+    function restore() {
+      try {
+        var v = window.localStorage.getItem(STORE_KEY);
+        if (v === 'classic' || v === 'snptools') scheme = v;
+      } catch (e) {}
+      return scheme;
+    }
+    function ready() {
+      return !!(ORIGINAL.gene && ORIGINAL.pan &&
+                window.colorScale && window.colorScale.__peTheme);
+    }
+
+    return {
+      DOMAINS: DOMAINS, CLASSIC_COLORS: CLASSIC_COLORS,
+      colorFor: colorFor, gapColor: function () { return GAP; },
+      stops: stops, gradientCSS: gradientCSS,
+      getScheme: getScheme, setScheme: setScheme, restore: restore,
+      install: install, ready: ready,
+    };
+  })();
+  window.PanEffectTheme = THEME;
+
+
+
+  /* compact horizontal score legend — benign (green) on the left,
+     strong effect (red) on the right, matching SNPImpact's score bar. */
   function buildLegendBar() {
     var wrap = document.createElement('div');
     wrap.className = 'pe-legend';
-    var bar = document.createElement('div'); bar.className = 'pe-legend-bar';
-    LEGEND_COLORS.forEach(function (col) {
-      var s = document.createElement('span'); s.style.background = col; bar.appendChild(s);
-    });
+    var bar = document.createElement('div');
+    bar.className = 'pe-legend-bar';
+    /* reversed: the ramp runs red -> green, the legend reads benign -> strong */
+    bar.style.background = THEME.gradientCSS(90, true);
     var labels = document.createElement('div'); labels.className = 'pe-legend-labels';
     labels.innerHTML = '<span>&gt; 0 (benign)</span><span>&minus;11</span><span>&lt; &minus;22 (strong)</span>';
-    wrap.appendChild(bar); wrap.appendChild(labels);
+    /* score 0 and no-data are sentinels in support.js, not ramp values, so
+       they get their own swatches rather than being read off the gradient */
+    var keys = document.createElement('div'); keys.className = 'pe-legend-keys';
+    keys.innerHTML =
+      '<span><i style="background:' + THEME.colorFor('gene', 0) + '"></i>wild type</span>' +
+      '<span><i style="background:' + THEME.colorFor('pan', 0) + '"></i>exact match</span>' +
+      '<span><i style="background:' + THEME.gapColor() + '"></i>gap / no data</span>';
+    wrap.appendChild(bar); wrap.appendChild(labels); wrap.appendChild(keys);
     return wrap;
   }
   function legend(hostEl, containerSel, cls) {
@@ -164,6 +337,99 @@
     if (prev) prev.remove();
     var el = buildLegendBar(); el.classList.add(cls);
     container.parentNode.insertBefore(el, container.nextSibling);
+  }
+
+  /* ---------------- colour-scheme toggle -----------------------------
+     One radio pair per view (B73 and pan). Both pairs drive the same
+     PanEffectTheme state and stay mirrored, so switching in one view is
+     already applied when you cross to the other. */
+  function schemeRow(sfx) {
+    var name = 'peScheme' + sfx;
+    return '' +
+      '<div class="pe-scheme" id="pe-scheme' + sfx + '">' +
+        '<span class="pe-scheme-lab">Colour scheme</span>' +
+        '<label><input type="radio" name="' + name + '" value="snptools" checked> SNPTools</label>' +
+        '<label><input type="radio" name="' + name + '" value="classic"> Classic</label>' +
+      '</div>';
+  }
+
+  function syncSchemeInputs(value) {
+    Array.prototype.forEach.call(
+      document.querySelectorAll('.pe-scheme input[type=radio]'),
+      function (r) { r.checked = (r.value === value); }
+    );
+  }
+
+  function wireScheme() {
+    syncSchemeInputs(THEME.getScheme());
+    Array.prototype.forEach.call(
+      document.querySelectorAll('.pe-scheme input[type=radio]'),
+      function (r) {
+        r.addEventListener('change', function () {
+          if (!r.checked) return;
+          THEME.setScheme(r.value);
+          syncSchemeInputs(r.value);
+          refreshColors();
+        });
+      }
+    );
+  }
+
+  /* Repaint everything the scheme touches.
+
+     The zoomed views need no colour logic of their own: updateHeatmapZoom
+     (genome.js) and updateHeatmapZoomPan (pan.js) build plain <div> cells
+     and call the GLOBAL colorScale / colorScalePan by name at draw time.
+     Both are top-level function declarations despite being indented, so
+     they are callable from here — we just re-run them with the same rows
+     and the current slider position, and they pick up the new scheme.
+     Dispatching 'input' on the sliders is kept as a second path in case a
+     build wires the redraw differently. */
+  function sliderStart(id) {
+    var s = document.getElementById(id);
+    var v = s ? parseInt(s.value, 10) : 1;
+    return (isNaN(v) || v < 1) ? 1 : v;
+  }
+
+  function redrawZoomViews() {
+    var done = { gene: false, pan: false };
+    try {
+      if (typeof updateHeatmapZoom === 'function' && state.lastData.b73) {
+        updateHeatmapZoom(state.lastData.b73, sliderStart('zoom-slider'));
+        done.gene = true;
+      }
+    } catch (e) { console.warn('[PanEffectEngine] zoom redraw (gene) failed:', e); }
+    try {
+      if (typeof updateHeatmapZoomPan === 'function' && state.lastData.pan) {
+        updateHeatmapZoomPan(state.lastData.pan, sliderStart('zoom-slider-pan'));
+        done.pan = true;
+      }
+    } catch (e) { console.warn('[PanEffectEngine] zoom redraw (pan) failed:', e); }
+
+    /* fallback: let PanEffect redraw them the way centerOnVariant does */
+    if (!done.gene || !done.pan) {
+      ['zoom-slider', 'zoom-slider-pan'].forEach(function (id) {
+        var s = document.getElementById(id);
+        if (s) s.dispatchEvent(new Event('input'));
+      });
+    }
+    return done;
+  }
+
+  function refreshColors() {
+    /* canvas grids: re-render from the cached rows */
+    if (state.lastData.b73) { try { canvasRenderGene(state.lastData.b73); } catch (e) {} }
+    if (state.lastData.pan) { try { canvasRenderPan(state.lastData.pan); } catch (e) {} }
+    redrawZoomViews();
+    rebuildLegends();
+  }
+
+  function rebuildLegends() {
+    Array.prototype.forEach.call(document.querySelectorAll('.pe-legend-bar'), function (bar) {
+      bar.style.background = THEME.gradientCSS(90, true);
+    });
+    var box = document.getElementById('colorBox-pan');
+    if (box) { box.innerHTML = ''; box.appendChild(buildLegendBar()); }
   }
 
   /* ---------------- view visibility --------------------------------- */
@@ -222,6 +488,7 @@
 
   /* ---------------- teardown ---------------------------------------- */
   function teardown() {
+    state.lastData.b73 = state.lastData.pan = null;
     if (state.grids.b73) { try { state.grids.b73.destroy(); } catch (e) {} state.grids.b73 = null; }
     if (state.grids.pan) { try { state.grids.pan.destroy(); } catch (e) {} state.grids.pan = null; }
     /* remove any leaked tooltips from the DOM zoomed views + stray canvas tips */
@@ -267,6 +534,13 @@
       /* swap the two full heatmaps to canvas (perf) */
       renderHeatmap = canvasRenderGene;
       renderHeatmapPan = canvasRenderPan;
+      /* re-skin the d3 zoomed views: genome.js / pan.js read colorScale and
+         colorScalePan at draw time, so reassigning them here is enough */
+      THEME.restore();
+      if (!THEME.install()) {
+        console.warn('[PanEffectEngine] could not re-point colorScale/colorScalePan; ' +
+          'the zoomed views will keep the classic colours.');
+      }
       /* clean, minimal summary + skip the GWAS traits fetch (that lives in SNPFunction) */
       populateSummary = cleanSummary;
       loadAndDisplayTraits = function () {};
@@ -283,6 +557,8 @@
       var ok = false;
       try { ok = await runPanEffect(); }
       catch (e) { console.error('[PanEffectEngine] pipeline error:', e); }
+
+      wireScheme();
 
       if (state.variant && state.variant.pos) {
         /* let the sliders finish wiring, then centre on the variant */
@@ -312,7 +588,9 @@
     */
     '<input type="radio" id="maizeWGS2026" name="variantEffect" value="maize2026">' +
     '<label for="maizeWGS2026">MaizeGDB 2026 High Coverage variant effects</label><br>' +
-  '</span><br>' +
+  '</span>' +
+  schemeRow('') +
+  '<br>' +
   '<div class="sectionHeader">PFAM Domains</div>' +
   '<div id="pfam-wrap"><div id="pfamNumberLine" class="numberLine"></div><div id="pfamGeneModel" class="geneModel"></div></div>' +
   '<div class="sectionHeader">Secondary Structure</div>' +
@@ -329,6 +607,7 @@
 
 '<div id="pan-genome" class="content">' +
   '<span class="gene" id="pan_gm"></span>' +
+  schemeRow('-pan') +
   '<div class="sectionHeader">PFAM Domains</div>' +
   '<div id="pfam-wrap-pan"><div id="pfamNumberLine-pan" class="numberLine"></div><div id="pfamGeneModel-pan" class="geneModel"></div></div>' +
   '<div class="sectionHeader">Secondary Structure</div>' +
@@ -345,5 +624,36 @@
 '</div>';
   }
 
-  window.PanEffectEngine = { render: render, teardown: teardown };
+  /* ---------------- diagnostics --------------------------------------
+     Run PanEffectEngine.diagnose() in the console if a colour change does
+     not take. Each line is a precondition for the toggle working. */
+  function diagnose() {
+    var r = {
+      themeLoaded:        !!window.PanEffectTheme,
+      scheme:             THEME.getScheme(),
+      originalsCaptured:  THEME.ready(),
+      colorScaleRepointed:    !!(window.colorScale && window.colorScale.__peTheme),
+      colorScalePanRepointed: !!(window.colorScalePan && window.colorScalePan.__peTheme),
+      zoomFnGene:  typeof window.updateHeatmapZoom    === 'function',
+      zoomFnPan:   typeof window.updateHeatmapZoomPan === 'function',
+      radiosFound: document.querySelectorAll('.pe-scheme input[type=radio]').length,
+      cachedRows:  { gene: state.lastData.b73 ? state.lastData.b73.length : 0,
+                     pan:  state.lastData.pan ? state.lastData.pan.length : 0 },
+      sampleGene:  { '0': THEME.colorFor('gene', 0),  '-11': THEME.colorFor('gene', -11) },
+      samplePan:   { '0': THEME.colorFor('pan', 0),   '-11': THEME.colorFor('pan', -11) },
+    };
+    console.table(r);
+    if (!r.colorScaleRepointed) console.warn('colorScale was not re-pointed — call PanEffectEngine.render() first.');
+    if (!r.radiosFound) console.warn('No scheme radios in the DOM — the skeleton has not been injected yet.');
+    if (!r.cachedRows.gene && !r.cachedRows.pan) console.warn('No cached rows — the data pipeline has not run.');
+    return r;
+  }
+
+  window.PanEffectEngine = {
+    render: render,
+    teardown: teardown,
+    refreshColors: refreshColors,
+    setScheme: function (v) { THEME.setScheme(v); syncSchemeInputs(THEME.getScheme()); refreshColors(); },
+    diagnose: diagnose,
+  };
 })();

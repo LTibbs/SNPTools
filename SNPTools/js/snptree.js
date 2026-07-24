@@ -247,7 +247,8 @@ const SNPTree = (function () {
         </div>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">
-        <button class="qbtn" onclick="SNPTree.toMatrix()">Distance matrix (SNPMatrix) →</button>
+        <button class="qbtn" onclick="SNPTree.toCompare('table')">SNPCompare (Table view) →</button>
+        <button class="qbtn" onclick="SNPTree.toCompare('matrix')">SNPCompare (Distance matrix) →</button>
         <span style="margin-left:auto"></span>
         <button class="qbtn" onclick="SNPTree.downloadSVG()">Download SVG</button>
         <button class="qbtn" onclick="SNPTree.downloadPNG()">Download PNG</button>
@@ -280,7 +281,18 @@ const SNPTree = (function () {
     if (g==='format') refreshText();     // text output can update without rebuilding
     else draw();                          // topology/layout/color need a redraw
   }
-  function toMatrix(){ if(ST.input){ S.matrixInput=ST.input; } go('snpmatrix'); }
+  function toCompare(view){
+    if(ST.input){
+      // Reuse the exact SNPVersity result that produced this tree.
+      S.compareInput=ST.input;
+      S.compareRequest={
+        view:view==='matrix'?'matrix':'table',
+        mode:'local',
+        autorun:true
+      };
+    }
+    go('snpcompare');
+  }
 
   /* ------------------------------------------------------------------ *
    *  6. Build + draw
@@ -527,7 +539,7 @@ const SNPTree = (function () {
   /* register with the suite shell */
   if (typeof SNPTools !== 'undefined') SNPTools.register('snptree', { render });
 
-  return { render, draw, setOpt, toMatrix, forceBuild, copyText, downloadText,
+  return { render, draw, setOpt, toCompare, forceBuild, copyText, downloadText,
            downloadSVG, downloadPNG, downloadPDF,
            // exposed for testing
            ibsMatrix, upgma, nj, toNewick, phylip, mega, dosage };

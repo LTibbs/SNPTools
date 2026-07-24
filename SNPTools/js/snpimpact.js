@@ -27,10 +27,36 @@
     const g = t<.5 ? Math.round(255*t*2) : 200;
     return `rgb(${r},${Math.max(60,g)},60)`;
   }
+
+  /* Choose black or white text from the actual score-chip background.
+     Pale yellow and green backgrounds receive dark text automatically,
+     while darker red/green backgrounds retain white text. */
+  function contrastTextColor(background){
+    const text = String(background || '').trim();
+    let rgb = null;
+    const hex = text.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+    if (hex){
+      let h = hex[1];
+      if (h.length === 3) h = h.split('').map(c => c+c).join('');
+      rgb = [parseInt(h.slice(0,2),16), parseInt(h.slice(2,4),16), parseInt(h.slice(4,6),16)];
+    } else {
+      const nums = text.match(/[0-9.]+/g);
+      if (nums && nums.length >= 3) rgb = nums.slice(0,3).map(Number);
+    }
+    if (!rgb || rgb.some(v => !Number.isFinite(v))) return '#ffffff';
+    const linear = rgb.map(v => {
+      const c = Math.max(0,Math.min(255,v))/255;
+      return c <= 0.04045 ? c/12.92 : Math.pow((c+0.055)/1.055,2.4);
+    });
+    const luminance = 0.2126*linear[0] + 0.7152*linear[1] + 0.0722*linear[2];
+    return luminance > 0.179 ? '#111827' : '#ffffff';
+  }
   function scorePct(v){ const lo=-12, hi=6; return Math.max(0,Math.min(100,((v-lo)/(hi-lo))*100)); }
   function scoreCell(v){
     if (v==null) return '<span style="color:var(--faint)">—</span>';
-    return `<span class="imp-score" style="background:${scoreColor(v)}">${v>0?'+':''}${v.toFixed(1)}</span>`;
+    const bg = scoreColor(v);
+    const fg = contrastTextColor(bg);
+    return `<span class="imp-score" style="background:${bg};color:${fg} !important;text-shadow:none">${v>0?'+':''}${v.toFixed(1)}</span>`;
   }
   const fmtMaf = m => (m==null ? '—' : (+m).toFixed(3));
 
@@ -54,6 +80,83 @@
     const sub = isMissense(r) ? aaSub(r) : '';
     if (typeof goPanEffect === 'function') goPanEffect(r.gene, sub ? {variant:sub} : undefined);
     else go('paneffect');
+  }
+
+  /* ---------- SNPFold jump ---------- */
+  /* Consequence classes that get a "fold ↗" link. SNPFold plots any coding
+     variant, so add 'lof','splice','indel' here if you want those linked too. */
+  const FOLD_CONS = ['missense'];
+  function isCodingForFold(r){
+    if (!r) return false;
+    if (FOLD_CONS.indexOf(r.consClass) !== -1) return true;
+    /* fall back to the text when consClass is absent/unexpected */
+    const c = r.consequence || '';
+    /*return /missense/i.test(c) || (/synonymous/i.test(c) && !/non[-_ ]?synonymous/i.test(c)); */
+    return /missense/i.test(r.consequence || '');
+  }
+  function canFold(r){ return !!(r && r.gene && r.gene!=='—') && isCodingForFold(r); }
+  /* Hand the gene *and* the site to SNPFold. SNPFold reuses an already-loaded
+     gene, so clicking several of these in a row costs no extra HDF5 queries. */
+  function foldJumpTo(r){
+    if (!r || !r.gene || r.gene==='—') return;
+    if (typeof goFold !== 'function') return go('snpfold');
+    /* Non-coding rows have nothing to highlight on the protein — open the gene only,
+       so SNPFold does not report a variant it could never have. */
+    if (!canFold(r)) return goFold(r.gene);
+    goFold(r.gene, {
+      chr: (IMP.input && IMP.input.chr) || undefined,
+      pos: r.pos, ref: r.ref, alt: r.alt,
+      sub: aaSub(r), effect: r.consequence,
+      resi: residueOf(r),
+    });
+  }
+
+  /* ---------- protein position ----------
+     The VCF only carries a protein residue (r.resi) for rows the annotator gave an
+     HGVSp — in practice missense and synonymous. Stop-gain, stop-loss, frameshift and
+     in-frame indels land in the CDS with resi == null, so nothing was ever placed on
+     the protein track. Derive the codon from the genomic position instead: walk the
+     CDS blocks in translation order, count bases up to pos, divide by 3. */
+  function cdsResidue(model, pos){
+    if (!model || !model.cds || !model.cds.length || pos==null) return null;
+    const cds = model.cds.slice().sort((a,b)=>a[0]-b[0]);
+    if (!cds.some(([a,b]) => pos>=a && pos<=b)) return null;   // UTR, intron, or outside
+    const minus = model.strand === '-';
+    let off = 0;                                               // 1-based offset into the CDS
+    if (!minus){
+      for (const [a,b] of cds){
+        if (pos > b){ off += b-a+1; continue; }
+        off += pos-a+1; break;
+      }
+    } else {
+      for (let i=cds.length-1; i>=0; i--){
+        const [a,b] = cds[i];
+        if (pos < a){ off += b-a+1; continue; }
+        off += b-pos+1; break;
+      }
+    }
+    return off>0 ? Math.ceil(off/3) : null;
+  }
+  /* Residue for any row, annotated or derived. Cached because render() re-runs often. */
+  function residueOf(r){
+    if (!r) return null;
+    if (r.resi != null) return r.resi;
+    if (r._resi !== undefined) return r._resi;                 // null is a valid cached answer
+    let v = null;
+    try {
+      if (r.gene && r.gene!=='—' && IMP.input && typeof Data.geneModelOf === 'function')
+        v = cdsResidue(Data.geneModelOf(IMP.input.chr, r.gene), r.pos);
+    } catch(e){ v = null; }
+    r._resi = v; r.resiDerived = (v != null);
+    return v;
+  }
+  /* Marker colour by consequence — a premature stop should not look like a missense. */
+  function markerClass(r){
+    if (r.consClass==='lof')    return 'vm lof';
+    if (r.consClass==='indel')  return 'vm indel';
+    if (r.consClass==='syn')    return 'vm syn';
+    if (r.consClass==='splice') return 'vm splice';
+    return 'vm';
   }
 
   function filtered(){
@@ -81,8 +184,28 @@
   }
 
   /* ---------- render ---------- */
+  /* SNPImpact can be reached without SNPVersity ever painting, so it carries its
+     own rule for the row jump link rather than relying on that tool's stylesheet. */
+  function injectImpactCSS(){
+    if (document.getElementById('snpimpact-jump-css')) return;
+    const s = document.createElement('style'); s.id = 'snpimpact-jump-css';
+    s.textContent = `
+      table.imp .fold-jump{font-size:11px;white-space:nowrap;margin-left:4px;
+        color:#176c3a;text-decoration:none;border-bottom:1px dotted #9ecdb1}
+      table.imp .fold-jump:hover{color:#0f4f2a;border-bottom-style:solid}
+      .protbar .vm{position:absolute;top:-4px;bottom:-4px;width:2px;margin-left:-1px;
+        background:#c0362c;z-index:4;border-radius:1px}
+      .protbar .vm.lof{background:#8b1a10;width:3px;margin-left:-1.5px}
+      .protbar .vm.indel{background:#b25a00}
+      .protbar .vm.splice{background:#7048b6}
+      .protbar .vm.syn{background:#5b7a99}
+      .protbar .lost-region{position:absolute;top:0;bottom:0;z-index:1;
+        background:repeating-linear-gradient(45deg,rgba(139,26,16,.13) 0 5px,rgba(139,26,16,.04) 5px 10px)}`;
+    document.head.appendChild(s);
+  }
   function render(page){
     page = page || document.getElementById('page');
+    injectImpactCSS();
     const input = S.impactInput;
     if (!input || !input.rows || !input.rows.length){ page.innerHTML = emptyState(); return; }
 
@@ -176,10 +299,14 @@
       ? ` <a class="pe-jump" href="#" title="View ${esc(sub||'this substitution')} in PanEffect"
              onclick="event.stopPropagation();IMPACT.panEffect('${r.id}');return false;">effects ↗</a>`
       : '';
+    const foldJump = canFold(r)
+      ? ` <a class="fold-jump" href="#" title="Show ${esc(sub || r.variant || 'this variant')} on the predicted protein structure in SNPFold"
+             onclick="event.stopPropagation();IMPACT.fold('${r.id}');return false;">fold ↗</a>`
+      : '';
     return `<tr class="imp-row ${opened?'open':''}" onclick="IMPACT.open('${r.id}')">
       <td class="gene-link" style="padding-left:11px">${r.gene}</td>
       <td class="c-mono c-alt">${r.variant}</td>
-      <td>${consPill(r)}${peJump}</td>
+      <td>${consPill(r)}${peJump}${foldJump}</td>
       <td>${domTag(r.domain)}</td>
       <td class="num">${scoreCell(r.plantcad)}</td>
       ${IMP.sec?`<td class="num">${scoreCell(r.plantcad2)}</td>`:''}
@@ -263,10 +390,11 @@
 
   /* ---------- variant detail: consequence → real domain track → AI scores ---------- */
   function consequenceBlurb(r){
-    if (r.consClass==='lof')     return 'Loss-of-function: '+r.consequence.toLowerCase()+(r.resi!=null?(' at residue '+r.resi):'')+' — likely disrupts the protein.';
+    const _resi = residueOf(r);
+    if (r.consClass==='lof')     return 'Loss-of-function: '+r.consequence.toLowerCase()+(_resi!=null?(' at residue '+_resi):'')+' — likely disrupts the protein.';
     if (r.consClass==='splice')  return 'Splice-site change — may disrupt normal transcript splicing.';
     if (r.consClass==='missense')return 'Missense'+(r.aaRef&&r.aaAlt?(' ('+r.aaRef+r.resi+r.aaAlt+')'):'')+' — single amino-acid substitution.';
-    if (r.consClass==='indel')   return r.consequence+' — in-frame change to protein length.';
+    if (r.consClass==='indel')   return r.consequence+(_resi!=null?(' at residue '+_resi):'')+' — in-frame change to protein length.';
     if (r.consClass==='syn')     return 'Synonymous — no amino-acid change.';
     return r.consequence+' — non-coding / regulatory region.';
   }
@@ -276,20 +404,39 @@
       return `<div class="id-sub">${r.domain==='—'?'No annotated Pfam domain at this position.':'Falls in '+r.domain+'.'}</div>`;
     }
     const L = gd.len;
+    const resi = residueOf(r);
+    const onProtein = resi!=null && resi<=L;
     const segs = (gd.domains||[]).map(d=>{
       const left = 100*(d.start-1)/L, w = Math.max(1.5, 100*(d.end-d.start+1)/L);
-      const hit = r.resi!=null && r.resi>=d.start && r.resi<=d.end;
+      const hit = onProtein && resi>=d.start && resi<=d.end;
       return `<div class="dom-seg ${hit?'':'alt'}" style="left:${left.toFixed(1)}%;width:${w.toFixed(1)}%"
                    title="${esc(d.name)} (${d.pfam}) ${d.start}-${d.end}">${esc(d.name)}</div>`;
     }).join('');
-    const marker = (r.resi!=null && r.resi<=L) ? `<div class="trunc" style="left:${(100*(r.resi-1)/L).toFixed(1)}%"></div>` : '';
-    const inDom = r.resi!=null ? (gd.domains||[]).find(d=>r.resi>=d.start&&r.resi<=d.end) : null;
+    const pct = onProtein ? (100*(resi-1)/L) : null;
+    /* A premature stop removes everything downstream — shade it so the lost domains read at a glance. */
+    const lost = (onProtein && r.consClass==='lof' && /stop[_ ]?gain|nonsense/i.test(r.consequence||''))
+      ? `<div class="lost-region" style="left:${pct.toFixed(1)}%;width:${(100-pct).toFixed(1)}%"></div>` : '';
+    const marker = onProtein
+      ? `<div class="${markerClass(r)}" style="left:${pct.toFixed(1)}%" title="${esc(r.consequence)} at residue ${resi}"></div>` : '';
+    const inDom = onProtein ? (gd.domains||[]).find(d=>resi>=d.start&&resi<=d.end) : null;
+
+    let note;
+    if (onProtein){
+      const where = inDom
+        ? `lies in the <b>${esc(inDom.name)}</b> domain (${inDom.pfam})`
+        : 'is outside annotated domains';
+      const truncated = lost ? ` Residues ${resi}–${L} are lost.` : '';
+      note = `Residue ${resi} ${where}.${truncated}` +
+             (r.resiDerived ? ` <span class="muted">(position derived from the CDS)</span>` : '');
+    } else if (resi!=null){
+      note = `Derived residue ${resi} falls beyond the annotated protein length (${L}) — transcript mismatch, not placed.`;
+    } else {
+      note = 'Variant is not in coding sequence — not placed on the protein.';
+    }
     return `
-      <div class="id-sub">${inDom
-          ? `Residue ${r.resi} lies in the <b>${esc(inDom.name)}</b> domain (${inDom.pfam}).`
-          : r.resi!=null ? `Residue ${r.resi} is outside annotated domains.` : 'Non-coding variant — not placed on the protein.'}</div>
+      <div class="id-sub">${note}</div>
       <div class="protbar">
-        <span class="pp" style="left:0">1</span>${segs}${marker}<span class="pp" style="right:0">${L}</span>
+        <span class="pp" style="left:0">1</span>${lost}${segs}${marker}<span class="pp" style="right:0">${L}</span>
       </div>`;
   }
   function detailHTML(r){
@@ -308,7 +455,8 @@
           </div>
         </div>
         <div class="idh-actions">
-          <button class="btn" onclick="goFold('${r.gene}')">${ICONS.fold} View in SNPFold</button>
+          <button class="btn" onclick="IMPACT.fold('${r.id}')"
+            title="${canFold(r) ? 'Show '+esc(peSub || r.variant)+' on the predicted structure' : 'View '+esc(r.gene)+' in SNPFold'}">${ICONS.fold} ${canFold(r) ? `SNPFold · ${esc(peSub || r.variant)}` : 'View in SNPFold'}</button>
           <button class="btn" onclick="goFunction('${r.gene}','${IMP.input.dataset}')">${ICONS.leaf||''} Gene in SNPFunction</button>
           <button class="btn ghost" onclick="IMPACT.panEffect('${r.id}')"
             title="${peSub ? 'Highlight '+esc(peSub)+' in PanEffect' : 'View '+esc(r.gene)+' in PanEffect'}"
@@ -375,6 +523,7 @@
         const d=document.getElementById('impDetail'); if(IMP.openId && d && d.scrollIntoView) d.scrollIntoView({behavior:'smooth',block:'nearest'}); }); },
     close(){ IMP.openId=null; render(); },
     panEffect(id){ panEffect(IMP.rows.find(r=>r.id===id)); },
+    fold(id){ foldJumpTo(IMP.rows.find(r=>r.id===id)); },
     star(id){ IMP.shortlist.has(id)?IMP.shortlist.delete(id):IMP.shortlist.add(id); render(); },
     sendCompare(){ if(IMP.input){ S.compareInput=IMP.input; } go('snpcompare'); },
     exportCSV(){
