@@ -99,7 +99,7 @@ button{font-family:inherit}
 .btn[disabled]{opacity:.5;cursor:not-allowed}
 .menu{
   position:absolute;right:0;top:46px;background:#fff;border:1px solid var(--line);border-radius:12px;
-  box-shadow:var(--shadow-lg);padding:6px;min-width:230px;display:none;z-index:50;
+  box-shadow:var(--shadow-lg);padding:6px;min-width:300px;display:none;z-index:50;
 }
 .menu.open{display:block;animation:pop .14s ease}
 @keyframes pop{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}

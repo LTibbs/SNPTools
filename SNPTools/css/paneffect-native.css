@@ -6,6 +6,24 @@
  *  zoomed views, so those rules stay global.
  * ===================================================================== */
 
+/* ---- score-colour tokens, shared with SNPImpact -----------------------
+   The ramp below is the CSS twin of snpimpact.js scoreColor(): red at the
+   deleterious end, amber through the middle, green at the benign end.
+   --pe-ramp runs deleterious -> benign; --pe-ramp-legend is reversed so
+   legends read benign -> strong, left to right, as PanEffect always has. */
+.pe-native-root {
+  --pe-ramp: linear-gradient(90deg,
+    rgb(255,60,60) 0%, rgb(255,127,60) 25%, rgb(255,200,60) 50%,
+    rgb(128,200,60) 75%, rgb(0,200,60) 100%);
+  --pe-ramp-legend: linear-gradient(90deg,
+    rgb(0,200,60) 0%, rgb(128,200,60) 25%, rgb(255,200,60) 50%,
+    rgb(255,127,60) 75%, rgb(255,60,60) 100%);
+  --pe-gap: #e8ebf1;                /* alignment gap / no data */
+  --pe-marker: var(--navy, #13264a);/* matches .sbar-mark in main.css */
+  --pe-strong: #d6322a;             /* matches .prio.top */
+  --pe-benign: #1f8a4c;             /* matches --green */
+}
+
 .pe-native-root { position: relative; overflow-x: auto; font-family: Arial, sans-serif; color: #141922; }
 
 /* view panels */
@@ -23,6 +41,22 @@
 
 .pe-native-root .gene { font-size: 18px; font-weight: 600; }
 .pe-native-root .pe-gm-head { font-size: 15px; color: #5b6472; margin: 2px 0 6px; }
+
+/* legend sentinel swatches */
+.pe-native-root .pe-legend-keys { display: flex; gap: 14px; margin-top: 6px; font-size: 11px; color: #5b6472; }
+.pe-native-root .pe-legend-keys span { display: inline-flex; align-items: center; gap: 5px; }
+.pe-native-root .pe-legend-keys i { width: 11px; height: 11px; border-radius: 2px; border: 1px solid #cfd6e2; display: inline-block; }
+
+/* colour-scheme toggle */
+.pe-native-root .pe-scheme {
+  display: inline-flex; align-items: center; gap: 14px;
+  margin: 12px 0 4px; padding: 7px 13px;
+  background: #f5f7fd; border: 1px solid #e6e9f2; border-radius: 9px;
+  font-size: 13px;
+}
+.pe-native-root .pe-scheme-lab { font-weight: 600; color: #5b6472; letter-spacing: .01em; }
+.pe-native-root .pe-scheme label { display: inline-flex; align-items: center; gap: 5px; margin: 0; cursor: pointer; }
+.pe-native-root .pe-scheme input { margin: 0; cursor: pointer; }
 
 /* section headers */
 .pe-native-root .sectionHeader { font-size: 16px; font-weight: bold; margin-top: 22px; }
@@ -56,7 +90,7 @@
 .pe-native-root #zoomed-heatmap { border: 2px solid black; }
 .pe-native-root #zoomed-heatmap-pan { overflow: visible; }
 .pe-native-root #highlight-box,
-.pe-native-root #highlight-box-pan { border: 3px solid blue; position: absolute; top: 0; height: 100%; z-index: 10; pointer-events: none; }
+.pe-native-root #highlight-box-pan { border: 3px solid var(--pe-marker); position: absolute; top: 0; height: 100%; z-index: 10; pointer-events: none; }
 
 /* sliders */
 .pe-native-root .slider-container { width: 1200px; margin: 20px 0; position: relative; }
@@ -65,9 +99,13 @@
 
 /* colour-box legend (native canvas) */
 .pe-native-root .pe-legend { margin: 8px 0 4px; width: 1200px; max-width: 100%; }
-.pe-native-root .pe-legend-bar { display: flex; height: 14px; width: 320px; border: 1px solid #cfd6e2; border-radius: 3px; overflow: hidden; }
-.pe-native-root .pe-legend-bar span { flex: 1; }
-.pe-native-root .pe-legend-labels { display: flex; justify-content: space-between; width: 320px; font-size: 11px; color: #5b6472; margin-top: 3px; }
+/* continuous ramp; the inline background set by buildLegendBar() wins, this
+   is the fallback if the theme module is unavailable */
+.pe-native-root .pe-legend-bar { display: block; height: 10px; width: 320px; border: 1px solid #cfd6e2; border-radius: 6px; overflow: hidden; background: var(--pe-ramp-legend); }
+.pe-native-root .pe-legend-bar span { display: none; }
+.pe-native-root .pe-legend-labels { display: flex; justify-content: space-between; width: 320px; font-size: 11px; color: #5b6472; margin-top: 4px; }
+.pe-native-root .pe-legend-labels span:first-child { color: var(--pe-benign); font-weight: 600; }
+.pe-native-root .pe-legend-labels span:last-child { color: var(--pe-strong); font-weight: 600; }
 .pe-native-root .colorBox { width: 30px; height: 30px; display: block; margin-bottom: 5px; }
 .pe-native-root .labelCB { font-size: 12px; margin-bottom: 5px; }
 .pe-native-root .valueCB { margin-left: 40px; display: inline-block; font-size: 12px; width: 40px; position: absolute; }
