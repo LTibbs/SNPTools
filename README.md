@@ -96,7 +96,12 @@ references.
 │   └── snphelp.js                  # Help & FAQ page
 ├── data/
 │   ├── structures/
-│   │   └── structure-<gene>.js     # per-gene AlphaFold model + metadata (SNPFold)
+│       ├── alphafold/
+│           └── structure-<gene>.js     # per-gene AlphaFold2 model + metadata (SNPFold)
+│       ├── boltz/
+│           └── structure-<gene>.js     # per-gene Boltz2 model + metadata (SNPFold)
+|       └── esmfold                 
+│           └── structure-<gene>.js     # per-gene ESMFold model + metadata (SNPFold)
 │   ├── domains/
 │   │   ├── by_chr/<chr>.json        # Pfam domains by genomic position
 │   │   ├── domains.by_protein.json  # domains in protein coords (SNPFold track)
