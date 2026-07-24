@@ -100,7 +100,7 @@ references.
 │           └── structure-<gene>.js     # per-gene AlphaFold2 model + metadata (SNPFold)
 │       ├── boltz/
 │           └── structure-<gene>.js     # per-gene Boltz2 model + metadata (SNPFold)
-|       └── esmfold                 
+|       └── esmfold/                 
 │           └── structure-<gene>.js     # per-gene ESMFold model + metadata (SNPFold)
 │   ├── domains/
 │   │   ├── by_chr/<chr>.json        # Pfam domains by genomic position
