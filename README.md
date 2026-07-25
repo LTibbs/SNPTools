@@ -45,7 +45,7 @@ tiny shell plus a set of self-registering tool modules:
   object. Tools never fetch data directly.
 - **Tool modules** (`snpversity.js`, `snpimpact.js`, …) each own one page and its
   view-state. A selection made in one tool is stashed on the shared `S` object (e.g.
-  `S.matrixInput`, `S.treeInput`, `S.impactInput`) and picked up by the next, which is how
+   `S.treeInput`, `S.impactInput`) and picked up by the next, which is how
   "Send selection to…" works.
 
 At runtime, a SNPVersity query POSTs a region + accession list to a small PHP backend,
@@ -90,7 +90,6 @@ references.
 │   ├── snpimpact.js                # AI-based variant prioritization
 │   ├── snpfold.js                  # protein-structure-aware interpretation
 │   ├── snptree.js                  # local phylogeny (IBS / NJ / UPGMA)
-│   ├── snpmatrix.js                # pairwise IBS distance matrix / heatmap
 │   ├── snpcompare.js               # similarity to a focal accession
 │   ├── snpfunction.js              # gene function & allele mining
 │   └── snphelp.js                  # Help & FAQ page
@@ -147,7 +146,6 @@ annotations, and B73 v5 coordinates, and selections flow freely between them.
 | **SNPFold** | Live | Structure-aware interpretation of coding variants. Aligns variants, Pfam domains, secondary structure, and per-residue pLDDT confidence on a linear "protein browser" track; renders an interactive 3D model (3Dmol.js, loaded on demand); and gives a per-variant structural-context readout. Structure data comes from precomputed `structure-<gene>.js` files. |
 | **SNPCompare** | Live | Ranks every accession by identity-by-state similarity to a chosen focal accession, in three scopes: genome-wide (precomputed, served per focal accession), this region (computed in-browser from a SNPVersity result), or both side-by-side with Δ = local − global to surface region-specific relatedness (introgression / selection). |
 | **SNPTree** | Live | Builds a local phylogenetic / similarity tree from the in-memory genotype matrix using identity-by-state distances (UPGMA / Neighbor-Joining). Exports Newick / MEGA / PHYLIP. Same method vocabulary as VCF2PopTree, reimplemented to run on the in-memory matrix and MaizeGDB metadata. |
-| **SNPMatrix** | Live | Computes the pairwise IBS distance matrix from the in-memory genotype matrix and renders a heatmap with clustered ordering, %-identity view, and bioproject color bars. Downloads: CSV distance matrix, PHYLIP, PNG, SVG. |
 | **SNPTrait** | In development | Will connect variation to phenotype and trait records from the National Germplasm collection; filter 20,000+ accessions by trait/metadata, then hand a set to the genomic tools. |
 | **SNPImpute** | In development | Pan-genome–guided imputation to fill missing genotypes and predict function across sequencing depths. |
 | **SNPGermplasm** | In development | Genotype-driven collection management: redundancy, uniqueness, and priority materials. |
