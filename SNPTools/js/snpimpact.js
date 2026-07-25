@@ -303,9 +303,11 @@
       ? ` <a class="fold-jump" href="#" title="Show ${esc(sub || r.variant || 'this variant')} on the predicted protein structure in SNPFold"
              onclick="event.stopPropagation();IMPACT.fold('${r.id}');return false;">fold ↗</a>`
       : '';
+    const vDisp = truncVariant(r.variant);
+    const vTrunc = vDisp !== String(r.variant==null?'':r.variant);
     return `<tr class="imp-row ${opened?'open':''}" onclick="IMPACT.open('${r.id}')">
       <td class="gene-link" style="padding-left:11px">${r.gene}</td>
-      <td class="c-mono c-alt">${r.variant}</td>
+      <td class="c-mono c-alt"${vTrunc?` data-tt="${esc(r.variant)}"`:''}>${esc(vDisp)}</td>
       <td>${consPill(r)}${peJump}${foldJump}</td>
       <td>${domTag(r.domain)}</td>
       <td class="num">${scoreCell(r.plantcad)}</td>
@@ -512,6 +514,22 @@
   }
 
   function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  /* Variant labels look like "12842710 CAGGT...>C" — a position, then REF>ALT.
+     Long indel REF sequences stretch the table column, so truncate the REF
+     portion to 10bp with an ellipsis; the untruncated label is still available
+     via a data-tt hover tooltip. Only the display string is truncated — the
+     underlying r.variant value (used for CSV export, links, etc.) is untouched. */
+  function truncVariant(variant){
+    const s = String(variant==null?'':variant);
+    const gt = s.indexOf('>');
+    if (gt<0) return s.length>10 ? s.slice(0,10)+'…' : s;
+    const before = s.slice(0,gt), after = s.slice(gt+1);
+    const sp = before.lastIndexOf(' ');
+    const pos = sp>=0 ? before.slice(0,sp+1) : '';
+    const ref = sp>=0 ? before.slice(sp+1) : before;
+    const refDisp = ref.length>10 ? ref.slice(0,10)+'…' : ref;
+    return `${pos}${refDisp}>${after}`;
+  }
 
   /* ---------- public handlers ---------- */
   window.IMPACT = {

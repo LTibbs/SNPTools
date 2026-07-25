@@ -22,6 +22,22 @@
   const ANN_DIR = './data/function/annotations/';
 
   function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  /* Variant labels look like "12842710 CAGGT...>C" — a position, then REF>ALT.
+     Long indel REF sequences stretch the table column, so truncate the REF
+     portion to 10bp with an ellipsis; the untruncated label is still available
+     via a data-tt hover tooltip. Only the display string is truncated — the
+     underlying v.variant value (used for CSV export, links, etc.) is untouched. */
+  function truncVariant(variant){
+    const s = String(variant==null?'':variant);
+    const gt = s.indexOf('>');
+    if (gt<0) return s.length>10 ? s.slice(0,10)+'…' : s;
+    const before = s.slice(0,gt), after = s.slice(gt+1);
+    const sp = before.lastIndexOf(' ');
+    const pos = sp>=0 ? before.slice(0,sp+1) : '';
+    const ref = sp>=0 ? before.slice(sp+1) : before;
+    const refDisp = ref.length>10 ? ref.slice(0,10)+'…' : ref;
+    return `${pos}${refDisp}>${after}`;
+  }
   function scoreColor(v){ const lo=-12,hi=6,t=Math.max(0,Math.min(1,(v-lo)/(hi-lo))); const r=t<.5?255:Math.round(255*(1-(t-.5)*2)); const g=t<.5?Math.round(255*t*2):200; return `rgb(${r},${Math.max(60,g)},60)`; }
 
   /* Choose black or white text from the actual score-chip background.
@@ -379,8 +395,10 @@
     const sec = Data.hasSecondaryScores(d.dataset);
     const rows = d.damaging.map(v=>{
       const open = FN.openId===v.id;
+      const vDisp = truncVariant(v.variant);
+      const vTrunc = vDisp !== String(v.variant==null?'':v.variant);
       return `<tr class="imp-row ${open?'open':''}" onclick="FUNCTION.toggle('${v.id}')">
-        <td class="c-mono c-alt" style="padding-left:11px">${v.variant}</td>
+        <td class="c-mono c-alt" style="padding-left:11px"${vTrunc?` data-tt="${esc(v.variant)}"`:''}>${esc(vDisp)}</td>
         <td>${consPill(v)}${peJump(v)}${foldJump(v)}</td>
         <td>${domTag(v.domain)}</td>
         <td class="num">${scoreCell(v.plantcad)}</td>

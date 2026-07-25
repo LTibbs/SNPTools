@@ -281,6 +281,17 @@ function exampleGene(){
 let accFilter='';
 const openProjects=new Set();   // project ids currently expanded (persists across re-renders)
 function escAttr(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+/* REF/ALT sequences can be long indels; truncate the visible text to keep the
+   table columns from stretching, while the full sequence stays available on
+   hover via the data-tt tooltip. */
+function alleleDisp(seq){
+  const s=String(seq==null?'':seq);
+  return s.length>10 ? s.slice(0,10)+'…' : s;
+}
+function alleleTT(seq,label){
+  const s=String(seq==null?'':seq);
+  return s.length>10 ? `${label}: ${s}` : label;
+}
 function renderAccPicker(){
   document.getElementById('accCard').innerHTML=`
     <div class="acc-top">
@@ -856,8 +867,8 @@ function rowHTML(r){
   return `<tr>
     <td class="c-mono" style="padding-left:11px">${S.chr.replace('chr','')}</td>
     <td class="c-pos"><a class="gene-link" href="${link}" target="_blank" rel="noopener">${r.pos.toLocaleString()}</a></td>
-    <td class="c-allele c-ref" data-tt="REF allele">${r.ref}</td>
-    <td class="c-allele c-alt" data-tt="ALT allele">${r.alt}</td>
+    <td class="c-allele c-ref" data-tt="${escAttr(alleleTT(r.ref,'REF allele'))}">${escAttr(alleleDisp(r.ref))}</td>
+    <td class="c-allele c-alt" data-tt="${escAttr(alleleTT(r.alt,'ALT allele'))}">${escAttr(alleleDisp(r.alt))}</td>
     <td>${r.gene}</td>
     <td class="effect-cell">${eff}</td>
     <td><span class="pill ${r.impact.toLowerCase()}">${r.impact}</span></td>
