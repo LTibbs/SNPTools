@@ -936,6 +936,9 @@
       if (!FD.viewer) buildViewer();           // (re)init if it never got a live DOM
       else { try { FD.viewer.resize(); FD.viewer.render(); } catch (e){} }
     }
+    // the SNPVersity selection may have changed while we were away — refresh the
+    // "Replace current selection (N)" hint so the count on screen is never stale
+    if (typeof Handoff!=='undefined') Handoff.sync(FD.root);
     if (typeof attachTT==='function') attachTT();
   }
 
@@ -1118,17 +1121,26 @@
       <div class="sec" style="margin-top:24px"><div class="bar"></div>
         <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;width:100%">
           <h2 style="font-size:16px;margin:0">Coding variants on this gene</h2>
-          ${anyCarriers()?`<button class="btn" style="margin-left:auto"
-            title="Open this gene's region in SNPVersity with every accession carrying any coding variant preselected"
-            onclick="FOLD.toVersity('all','all')">${ICONS.dna||''} Send all carriers to SNPVersity</button>`:''}
+          <span style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap">
+            ${FD.gene?`<button class="btn" title="Open ${escFold(FD.gene)}'s functional dossier in SNPFunction"
+              onclick="FOLD.toFunction()">${ICONS.leaf||ICONS.star||''} Send gene to SNPFunction</button>`:''}
+            ${anyCarriers()?`<button class="btn"
+              title="Open this gene's region in SNPVersity with every accession carrying any coding variant preselected"
+              onclick="FOLD.toVersity('all','all')">${ICONS.dna||''} Send all carriers to SNPVersity</button>`:''}
+          </span>
         </div>
       </div>
+      ${anyCarriers()?`<div class="fn-handoff">
+        <span class="fn-handoff-k">Handoff to SNPVersity</span>
+        <span data-ho-mount data-ho-id="foldMergeReplace" data-ho-target="SNPVersity" data-ho-dataset="${escFold(datasetId(FD.dataset)==null?'':datasetId(FD.dataset))}"></span>
+      </div>`:''}
       <div class="tbl-wrap" style="max-height:none"><table class="vcf fold-table">
         <thead id="foldTableHead">${tableHeadHTML()}</thead>
         <tbody id="foldTableBody">${sortedVariants().map(rowHTML).join('')}</tbody>
       </table></div>
     `;
     buildViewer();
+    if (typeof Handoff!=='undefined') Handoff.sync(FD.root);
     if (typeof attachTT==='function') attachTT();
     applyPendingVariant();          // honor an incoming "show me this site" request
   }
@@ -1576,12 +1588,28 @@
         gene:FD.gene, chr:locus.chr, start:locus.start, end:locus.end,
         dataset:(locus.dataset!=null?locus.dataset:datasetId(FD.dataset)),
         accessions:[...acc], from:'SNPFold', note,
-        allele: id==='all' ? null : vs[0].variant, mode
+        allele: id==='all' ? null : vs[0].variant, mode,
+        merge: (typeof Handoff!=='undefined') ? Handoff.mode() : 'replace'
       };
+      if (typeof Handoff!=='undefined'){ Handoff.toVersity(payload); return; }
       if (typeof window.versityRequest === 'function'){ window.versityRequest(payload); return; }
       if (typeof S !== 'undefined' && S){          // older snpversity.js build
         S.pendingVersity = payload;
         if (typeof go === 'function') go('snpversity');
+      }
+    },
+    /* Hand this gene model over to SNPFunction for its full functional dossier
+       (domains, GO terms, variant burden, damaging-allele catalog). Prefers the
+       shared goFunction(gene, dataset) helper; falls back to setting the
+       inbound-request fields directly for older builds without it. */
+    toFunction(){
+      if (!FD.gene) return;
+      const ds = datasetId(FD.dataset);
+      if (typeof goFunction === 'function'){ goFunction(FD.gene, ds); return; }
+      if (typeof S !== 'undefined' && S){
+        S.functionGene = FD.gene;
+        S.functionDataset = ds;
+        if (typeof go === 'function') go('snpfunction');
       }
     },
     /* Click a column header to sort; click the same header again to reverse.
@@ -1620,6 +1648,7 @@
          is NOT reloaded here — the new dataset is applied when the user presses
          "Load structure" (FOLD.loadGene), which reads the current FD.dataset. */
       syncDatasetChooser();
+      if (typeof Handoff!=='undefined') Handoff.sync(FD.root);
     },
   };
 
@@ -1669,6 +1698,12 @@
       .carrier.het{background:#eef4ff;border-color:#cfe0ff;color:#274b8f}
       .fold-sendrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px;
         border-top:1px solid var(--line);padding-top:10px}
+      /* handoff mode — sits directly above the table whose buttons it governs */
+      .fn-handoff{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;
+        background:#f7faff;border:1px solid #dce6f5;border-radius:9px;
+        padding:8px 12px;margin:12px 0}
+      .fn-handoff-k{font-size:10.5px;font-weight:600;color:var(--muted);
+        text-transform:uppercase;letter-spacing:.4px;flex:0 0 auto}
       .btn.tiny{font-size:11px;padding:4px 9px;border-radius:7px;line-height:1.3;white-space:nowrap}
       td.fold-send{text-align:right;padding-right:10px;white-space:nowrap}
       .fold-table th.fold-send-th{width:1%}

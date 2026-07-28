@@ -705,7 +705,7 @@ const Data = (function () {
       const coding = (cls.klass==='missense'||cls.klass==='lof'||cls.klass==='indel');
       const variant = (p && p.resi!=null && coding) ? hgvsProtein(p, {label:cls.label, klass:cls.klass}) : `${r.pos} ${r.ref}>${r.alt}`;
       return {id:'fx'+vi, pos:r.pos, ref:r.ref, alt:r.alt, variant, consequence:cls.label, consClass:cls.klass, severe:cls.severe,
-        domain:r.domain||'\u2014', resi:p?p.resi:null, plantcad:pc, esm, plantcad2:pc2, esm2, esm3, combined,
+        domain:r.domain||'\u2014', resi:p?p.resi:null, aaRef:p?p.ref:null, aaAlt:p?p.alt:null, plantcad:pc, esm, plantcad2:pc2, esm2, esm3, combined,
         priority: impactPriority(cls, combined, r.impact),
         het, hom, af, carriersHom:homIds, carriersHet:hetIds};
     });

@@ -28,6 +28,8 @@
     /* last rows handed to each canvas renderer, so a colour-scheme change
        can re-render without re-running the whole fetch pipeline */
     lastData: { b73: null, pan: null },
+    /* genome.js's original updateHeatmapZoom, captured once before we wrap it */
+    origUpdateHeatmapZoom: null,
   };
 
   /* ---------------- fetch rebaser -------------------------------------
@@ -103,7 +105,7 @@
         return 'Position: ' + c.x + '<br>Substitution: ' + c.wt + ' &rarr; ' +
                numberToAminoAcid(c.y) + '<br>Score: ' + c.score;
       },
-      highlight: (hl && hl.y) ? hl : null,
+      highlight: hl,
     });
     grid.canvas.classList.add('pe-hm');
     state.grids.b73 = grid;
@@ -145,6 +147,59 @@
     state.grids.pan = grid;
     var box = document.getElementById('colorBox-pan');
     if (box) { box.innerHTML = ''; box.appendChild(buildLegendBar()); }
+  }
+
+  /* ---------------- zoomed-region highlight overlay -------------------
+     updateHeatmapZoom() (genome.js) builds the zoomed div-per-cell grid
+     directly, clearing and re-populating #zoomed-heatmap on every call —
+     it isn't ours to rewrite, so we wrap it instead (same technique as
+     the canvas swap above): call the original to draw the cells, then
+     drop a bordered overlay <div> on top of whichever cell matches
+     state.variant, if that position falls inside the current 50-residue
+     window. Falls back to marking the whole column when the amino-acid
+     row can't be resolved, same as the full-protein canvas ring. */
+  function zoomHighlightOverlay(start) {
+    var host = document.getElementById('zoomed-heatmap');
+    if (!host) return;
+    if (!state.variant || state.variant.pos == null) return;
+    var x = state.variant.pos;
+    var end = start + 49;
+    if (x < start || x > end) return; // variant isn't in the visible window
+
+    var cellWidth = window_length / 50;
+    var cellHeight = 20;
+    var yRow = subToRow(state.variant.sub);
+
+    var ring = document.createElement('div');
+    ring.className = 'pe-zoom-ring';
+    ring.style.position = 'absolute';
+    ring.style.pointerEvents = 'none';
+    ring.style.boxSizing = 'border-box';
+    ring.style.border = '2px solid #111';
+    ring.style.boxShadow = '0 0 0 2px #fff';
+    ring.style.left = ((x - start) * cellWidth - 1) + 'px';
+    ring.style.width = (cellWidth + 2) + 'px';
+    if (yRow != null) {
+      ring.style.top = (cellHeight * (yRow - 1) - 1) + 'px';
+      ring.style.height = (cellHeight + 2) + 'px';
+    } else {
+      ring.style.top = '-1px';
+      ring.style.height = (cellHeight * Y_ROWS + 2) + 'px';
+    }
+    host.appendChild(ring);
+  }
+
+  /* Install the wrap exactly once: capture the true genome.js original
+     before ever reassigning the global, so re-navigating (render() called
+     again for a different gene) re-points to the same wrapper rather than
+     wrapping an already-wrapped function. */
+  function installZoomHighlight() {
+    if (state.origUpdateHeatmapZoom || typeof updateHeatmapZoom !== 'function') return;
+    state.origUpdateHeatmapZoom = updateHeatmapZoom;
+    updateHeatmapZoom = function (data, start) {
+      state.origUpdateHeatmapZoom(data, start);
+      try { zoomHighlightOverlay(start); } catch (e) { console.warn('[PanEffectEngine] zoom highlight failed:', e); }
+    };
   }
 
   /* ================= colour theme (inlined) ==========================
@@ -534,6 +589,8 @@
       /* swap the two full heatmaps to canvas (perf) */
       renderHeatmap = canvasRenderGene;
       renderHeatmapPan = canvasRenderPan;
+      /* overlay a ring on the matching cell in the zoomed (div-based) view */
+      installZoomHighlight();
       /* re-skin the d3 zoomed views: genome.js / pan.js read colorScale and
          colorScalePan at draw time, so reassigning them here is enough */
       THEME.restore();
@@ -561,8 +618,19 @@
       wireScheme();
 
       if (state.variant && state.variant.pos) {
-        /* let the sliders finish wiring, then centre on the variant */
+        /* let the sliders finish wiring, then centre on the variant.
+           fetchDataAndSetup() kicks off a pfam/DSSP fetch it does NOT await
+           (deliberately, so the initial render isn't blocked on it), and that
+           callback re-draws the zoomed number-line ticks for whatever start
+           position was current when IT happens to resolve. Since it's not
+           awaited, it can settle before or after this first centering pass —
+           if it loses that race it can silently reset the ticks back to the
+           default range even though the heatmap cells / WT line / box are
+           already showing the right spot. Re-apply once more after giving
+           that fetch time to finish, so the centered position is always the
+           final word regardless of network timing. */
         setTimeout(function () { centerOnVariant(state.variant.pos); }, 0);
+        setTimeout(function () { centerOnVariant(state.variant.pos); }, 400);
       }
       return ok;
     })();

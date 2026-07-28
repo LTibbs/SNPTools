@@ -162,9 +162,9 @@ const SNPCompare = (function () {
   const MASK_FILL='#e6e9ef', MASK_LINE='#b6bdc9', DIAG_FILL='#39424f';
 
   const SCALES={
-    logd : {label:'Log distance',        hint:'colour ∝ −log₁₀(1 − similarity); spreads the crowded top end'},
+    logd : {label:'Log distance',        hint:'color ∝ −log₁₀(1 − similarity); spreads the crowded top end'},
     clip : {label:'Percentile clipped',  hint:'linear similarity, domain = 2nd–98th percentile of observed pairs'},
-    rank : {label:'Rank / quantile',     hint:'colour = rank among all pairs; maximal contrast, relative meaning'},
+    rank : {label:'Rank / quantile',     hint:'color = rank among all pairs; maximal contrast, relative meaning'},
     z    : {label:'Z-score (diverging)', hint:'standard deviations from the panel mean; centred palette'},
     fixed: {label:'Raw 0–1',             hint:'the unscaled ramp, for reference'},
   };
@@ -489,7 +489,6 @@ const SNPCompare = (function () {
         <span style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap">
           <button class="qbtn" onclick="SNPCompare.exportMatrixCSV()">Export matrix</button>
           <button class="qbtn" onclick="SNPCompare.toTree()">Open region in SNPTree</button>
-          <button class="qbtn" onclick="SNPCompare.toMatrix()">Open in SNPMatrix</button>
         </span>
       </div>`:''}
     </div>
@@ -569,7 +568,7 @@ const SNPCompare = (function () {
     el.innerHTML=`<div class="card pad" style="margin-bottom:12px">
       <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-end">
         ${needScale?`<div>
-          <div class="fl-lbl">Colour scale</div>
+          <div class="fl-lbl">Color scale</div>
           <select class="cmp-f" style="width:auto;min-width:190px" onchange="SNPCompare.setScale(this.value)">
             ${Object.keys(SCALES).map(k=>`<option value="${k}" ${ST.scale===k?'selected':''}>${esc(SCALES[k].label)}</option>`).join('')}
           </select></div>`:''}
@@ -602,7 +601,7 @@ const SNPCompare = (function () {
             <option value="none" ${ST.mdsLabels==='none'?'selected':''}>None</option>
           </select></div>`:''}
         ${needScale?`<div style="flex:1 1 320px;min-width:300px">
-          <div class="fl-lbl">Colour domain — drag the handles</div>
+          <div class="fl-lbl">Color domain — drag the handles</div>
           <div id="cmpLegend"></div></div>`:''}
         <div style="margin-left:auto;align-self:flex-end">
           <button class="qbtn" onclick="SNPCompare.saveImage()">Save ${ST.view==='matrix'?'matrix':ST.view==='mds'?'PCoA':'focal spread'} PNG</button>
@@ -618,8 +617,16 @@ const SNPCompare = (function () {
   /* Dragging must not rebuild the control strip, or the SVG under the pointer
      is destroyed mid-gesture. The handles are moved in place and only the
      view beneath is repainted.                                            */
+  let legendDragging=false; // true while a handle is being dragged; blocks rebuilds below
   function drawLegend(sc){
     const host=document.getElementById('cmpLegend'); if(!host||!sc) return;
+    // A drag in progress calls renderView() -> renderMatrix()/renderMDS() -> drawLegend()
+    // on every pointermove. Rebuilding the SVG mid-gesture destroys the element that
+    // holds pointer capture and the closure holding the active drag state, so the
+    // drag silently stops after the first move. repaintLegend() (below, inside the
+    // still-live closure) already keeps the handles/colours in sync during the drag,
+    // so skip the rebuild entirely while dragging.
+    if(legendDragging) return;
     const W=Math.max(260, host.clientWidth||320), H=64, pad=6, bins=44;
     const lo=sc.tmin, hi=sc.tmax, span=(hi-lo)||1;
     const counts=new Array(bins).fill(0);
@@ -669,12 +676,13 @@ const SNPCompare = (function () {
     svg.addEventListener('pointerdown',e=>{
       const g=e.target.closest('.cmp-h');
       drag = g? g.getAttribute('data-h') : (Math.abs(val(e)-sc.lo)<Math.abs(val(e)-sc.hi)?'lo':'hi');
+      legendDragging=true;
       try{ svg.setPointerCapture(e.pointerId); }catch(_){}
       move(e);
     });
     svg.addEventListener('pointermove',move);
-    svg.addEventListener('pointerup',()=>{ drag=null; });
-    svg.addEventListener('pointercancel',()=>{ drag=null; });
+    svg.addEventListener('pointerup',()=>{ drag=null; legendDragging=false; drawLegend(sc); });
+    svg.addEventListener('pointercancel',()=>{ drag=null; legendDragging=false; drawLegend(sc); });
     svg.addEventListener('dblclick',()=>{ ST.dom=null; paint(); });
   }
   function fmtInv(sc,t){ const v=sc.inv(t); return isFinite(v)? Math.max(0,Math.min(1,v)).toFixed(4) : '—'; }
@@ -1059,7 +1067,7 @@ const SNPCompare = (function () {
       <text x="16" y="${H/2}" font-size="11" fill="#6b7280" text-anchor="middle" transform="rotate(-90 16 ${H/2})">similarity</text>
     </svg>
     <div class="mtx-note" style="margin-top:10px">Each point is one pair. Similarity estimated from few sites fans out wildly at the
-    left — that fan is the artefact that a 0–1 colour ramp reads as real divergence. Pairs left of the dashed line are masked in the
+    left — that fan is the artefact that a 0–1 color ramp reads as real divergence. Pairs left of the dashed line are masked in the
     matrix and the spread. Orange points involve the focal accession.</div>`;
     counter(`<b>${pts.length.toLocaleString()}</b> pairs · <b>${pts.filter(p=>p.x<thr).length.toLocaleString()}</b> fall below the mask threshold.`);
     banner();

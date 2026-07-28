@@ -110,11 +110,23 @@
   }
 
   /* view switches — same contracts the other tools use */
+  /* NOTE: aaSub(v) can only build a "A123T"-style token when this record carries
+     .sub, or .aaRef+.aaAlt+.resi. SNPImpact's rows (VCF-derived) reliably have
+     one of those; FN's damaging-catalog rows may only carry .resi (protein
+     position) alongside the genomic .pos/.ref/.alt (see foldTo() below, which
+     already treats aaRef/aaAlt as possibly absent and leans on chr/pos/ref/alt/resi
+     instead). If aaSub() comes back empty, fall back to a position-only
+     variant so PanEffect can still center the window on the site — the same
+     tolerant-matching idea SNPFold's goFold() already relies on — rather than
+     silently sending no variant at all, which is what was happening before. */
   function panEffectTo(v){
     const gene = fnGene(); if (!gene) return;
     if (typeof goPanEffect !== 'function') return go('paneffect');
-    const sub = isMissense(v) ? aaSub(v) : '';
-    goPanEffect(gene, sub ? {variant:sub} : undefined);
+    if (!isMissense(v)) { goPanEffect(gene); return; }
+    const sub = aaSub(v);
+    if (sub) { goPanEffect(gene, {variant: sub}); return; }
+    if (v && v.resi != null) { goPanEffect(gene, {variant: {pos: v.resi}}); return; }
+    goPanEffect(gene);
   }
   /* Hands the gene *and* the site to SNPFold. SNPFold reuses an already-loaded gene,
      so clicking several of these in a row triggers no further HDF5 queries. */
@@ -247,6 +259,9 @@
   /* re-show already-rendered content without re-analyzing */
   function reshowLoaded(){
     syncDatasetChooser();
+    // the SNPVersity selection may have changed while we were away — refresh the
+    // "Replace current selection (N)" hint so the count on screen is never stale
+    if (typeof Handoff!=='undefined') Handoff.sync(FN.root);
     if (typeof attachTT==='function') attachTT();
   }
 
@@ -296,6 +311,7 @@
       return;
     }
     FN.root.innerHTML = datasetChooser() + searchBar() + hero(d) + dossier(d) + annotationSection() + burden(d) + catalog(d);
+    if (typeof Handoff!=='undefined') Handoff.sync(FN.root);
     if (typeof attachTT==='function') attachTT();
   }
 
@@ -330,7 +346,6 @@
   function dossier(d){
     const region = `${d.chr}:${(+d.start).toLocaleString()}–${(+d.end).toLocaleString()}${d.strand?` (${d.strand})`:''}`;
     const jb = `https://jbrowse.maizegdb.org/index.html?data=B73&loc=${encodeURIComponent(d.gene)}`;
-    const pe = `https://maizegdb.org/effect/maize_v2/index.html?id=${encodeURIComponent(d.gene)}`;
     const mg = `https://maizegdb.org/gene_center/gene/${encodeURIComponent(d.gene)}`;
     const pg = `https://pangenome-viewer.maizegdb.org/?set=NAM&geneID=${encodeURIComponent(d.gene)}`;
     const doms = (d.domains||[]).length
@@ -345,7 +360,7 @@
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
         <button class="btn" onclick="goFold('${esc(d.gene)}')">${ICONS.fold} View structure (SNPFold)</button>
-        <a class="btn ghost" href="${pe}" target="_blank" rel="noopener">PanEffect ↗</a>
+        <button class="btn" onclick="FUNCTION.panEffectGene()">${ICONS.effect||ICONS.star||''} PanEffect</button>
         <a class="btn ghost" href="${jb}" target="_blank" rel="noopener">JBrowse ↗</a>
         <a class="btn ghost" href="${mg}" target="_blank" rel="noopener">MaizeGDB ↗</a>
         <a class="btn ghost" href="${pg}" target="_blank" rel="noopener">Pangenome viewer ↗</a>
@@ -416,15 +431,22 @@
       </tr>${open?carrierRow(v,sec,d):''}`;
     }).join('');
     const anyCarrier = d.damaging.some(v=>(v.hom+v.het)>0);
+    const dsId = d.dataset!=null ? d.dataset : FN.dataset;
     return `<div class="card pad">
       <div class="fn-h" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">Damaging &amp; knockout alleles
         <span class="muted" style="font-weight:400;font-size:12px">${d.damaging.length} alleles · click a row for carrier lines</span>
         <span style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap">
           ${anyCarrier?`<button class="btn" title="Open this gene's region in SNPVersity with every accession carrying any damaging allele preselected"
             onclick="FUNCTION.toVersity('all','all')">${ICONS.dna||''} Send all carriers to SNPVersity</button>`:''}
+          <button class="btn" title="Open ${esc(d.gene)} in SNPFold to see it mapped onto the predicted protein structure"
+            onclick="goFold('${esc(d.gene)}')">${ICONS.fold||''} Send gene to SNPFold</button>
           <button class="btn" onclick="FUNCTION.exportCSV()">${ICONS.download||''} Export CSV</button>
         </span>
       </div>
+      ${anyCarrier?`<div class="fn-handoff">
+        <span class="fn-handoff-k">Handoff to SNPVersity</span>
+        <span data-ho-mount data-ho-id="fnMergeReplace" data-ho-target="SNPVersity" data-ho-dataset="${esc(dsId==null?'':dsId)}"></span>
+      </div>`:''}
       <div class="tbl-wrap" style="max-height:none"><table class="vcf imp">
         <thead><tr><th style="padding-left:11px">Allele</th><th>Consequence</th><th>Domain</th><th class="num">PlantCAD1</th>${sec?'<th class="num">PlantCAD2</th>':''}<th class="num">ESM</th>${sec?'<th class="num">ESM2</th><th class="num">ESM3</th>':''}<th>Priority</th><th class="num" title="heterozygous carriers">Het</th><th class="num" title="homozygous carriers">Hom</th><th class="num">AF</th><th></th></tr></thead>
         <tbody>${rows}</tbody>
@@ -699,16 +721,27 @@
     toggle(id){ FN.openId = (FN.openId===id?null:id); paint(); },
     panEffect(id){ const d=FN.data; if(!d||!d.damaging) return;
       panEffectTo(d.damaging.find(v=>String(v.id)===String(id))); },
+    /* whole-gene jump (no specific allele) — used by the dossier card's PanEffect button */
+    panEffectGene(){ panEffectTo(); },
     fold(id){ const d=FN.data; if(!d||!d.damaging) return;
       foldTo(d.damaging.find(v=>String(v.id)===String(id))); },
 
     /* Hand this gene's region + the accessions carrying an alternative allele
-       over to SNPVersity.  alleleId 'all' = every damaging allele in the table.
-       mode: 'hom' | 'het' | 'all' (homozygous, heterozygous, or both). */
+       over to SNPVersity.
+         alleleId : 'all' = every damaging allele in the table
+                    a single id, or an array of ids (union of their carriers)
+         mode     : 'hom' | 'het' | 'all' (homozygous, heterozygous, or both)
+       Whether SNPVersity adds these to its current selection or replaces it is
+       carried on the payload as `merge`, read from the checkbox above the table
+       (Handoff owns that state — do NOT overload `mode`, which is the zygosity
+       filter and is used downstream). */
     toVersity(alleleId, mode){
       const d=FN.data; if(!d||!d.damaging) return;
       mode = mode || 'all';
-      const vs = alleleId==='all' ? d.damaging : d.damaging.filter(v=>String(v.id)===String(alleleId));
+      const ids = Array.isArray(alleleId) ? alleleId.map(String) : null;
+      const vs = alleleId==='all' ? d.damaging
+               : ids              ? d.damaging.filter(v=>ids.indexOf(String(v.id))>=0)
+               :                    d.damaging.filter(v=>String(v.id)===String(alleleId));
       if(!vs.length) return;
       const acc=new Set();
       vs.forEach(v=>{
@@ -719,15 +752,17 @@
       const what = mode==='hom' ? 'homozygous carriers'
                  : mode==='het' ? 'heterozygous carriers'
                  : 'carriers of an alternative allele';
-      const note = alleleId==='all'
+      const note = (alleleId==='all' || (ids && vs.length>1))
         ? `${what} across ${vs.length} damaging allele${vs.length>1?'s':''}`
         : `${what} of ${vs[0].variant}`;
       const payload = {
         gene:d.gene, chr:d.chr, start:+d.start, end:+d.end,
         dataset:d.dataset!=null?d.dataset:FN.dataset,
         accessions:[...acc], from:'SNPFunction', note,
-        allele: alleleId==='all' ? null : vs[0].variant, mode
+        allele: vs.length===1 ? vs[0].variant : null, mode,
+        merge: (typeof Handoff!=='undefined') ? Handoff.mode() : 'replace'
       };
+      if (typeof Handoff!=='undefined'){ Handoff.toVersity(payload); return; }
       if (typeof window.versityRequest === 'function'){ window.versityRequest(payload); return; }
       // fallback if snpversity.js is an older build without the inbound hook
       if (typeof S !== 'undefined' && S){
@@ -746,6 +781,7 @@
       FN.dataset = val;
       if (typeof S !== 'undefined' && S) S.dataset = val;   // keep the whole app in sync
       syncDatasetChooser();
+      if (typeof Handoff!=='undefined') Handoff.sync(FN.root);
     },
     exportCSV(){
       const d=FN.data; if(!d||!d.damaging) return;
@@ -797,6 +833,12 @@
       .carrier.het{background:#eef4ff;border-color:#cfe0ff;color:#274b8f}
       .fn-sendrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px;
         border-top:1px solid var(--line);padding-top:10px}
+      /* handoff mode — sits directly above the table whose buttons it governs */
+      .fn-handoff{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;
+        background:#f7faff;border:1px solid #dce6f5;border-radius:9px;
+        padding:8px 12px;margin:0 0 12px}
+      .fn-handoff-k{font-size:10.5px;font-weight:600;color:var(--muted);
+        text-transform:uppercase;letter-spacing:.4px;flex:0 0 auto}
       .btn.tiny{font-size:11px;padding:4px 9px;border-radius:7px;line-height:1.3;white-space:nowrap}
       td.fn-send{text-align:right;padding-right:10px;white-space:nowrap}
       /* per-row jump links in the Consequence column */

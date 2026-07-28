@@ -65,8 +65,9 @@ function renderVersity(){
     if(st && inbound.gene){ st.className='status ok'; st.textContent=`Region set from ${inbound.gene} (${S.chr}:${S.start.toLocaleString()}–${S.end.toLocaleString()})`; }
     if(inbound.missing && inbound.missing.length){
       uplSay('warn', `${inbound.missing.length} carrier${inbound.missing.length>1?'s are':' is'} not present in this dataset's accession list and could not be selected.`);
-      renderUplReport({matched:inbound.selected, considered:inbound.selected+inbound.missing.length,
-        unmatched:inbound.missing.map((t,i)=>({line:i+1, text:t})), dupes:[], fanout:[], source:'SNPFunction', skippedHeader:null, applied:true});
+      renderUplReport({matched:inbound.added+inbound.already, considered:inbound.requested,
+        unmatched:inbound.missing.map((t,i)=>({line:i+1, text:t})), dupes:[], fanout:[],
+        source:inbound.from||'SNPFunction', skippedHeader:null, applied:true});
     }
     document.getElementById('runbar').scrollIntoView({behavior:'smooth',block:'center'});
     return;
@@ -88,19 +89,30 @@ window.versityRequest = function(payload){
 };
 
 /* consume S.pendingVersity: switch dataset, set the region, resolve + select
-   the accessions. Returns a summary for the banner, or null. */
+   the accessions. Honours req.merge ('add' | 'replace'); anything else — including
+   a payload from a tool that predates the flag — replaces, which is the old
+   behaviour. Returns a summary for the banner, or null. */
 function applyPendingRequest(){
   const req = S.pendingVersity; if(!req) return null;
   S.pendingVersity = null;
 
+  // Accession IDs are not portable between dataset families, so a handoff that
+  // switches dataset can only ever reset the selection — 'add' is meaningless.
+  const crossDataset = !!(req.dataset && req.dataset!==S.dataset && DATASETS.some(d=>d.id===req.dataset));
+  const merge = crossDataset ? 'replace' : (req.merge==='add' ? 'add' : 'replace');
+
+  // Snapshot dataset + region + selection *before* touching any of them, so a
+  // single Undo reverts the whole query state coherently rather than half of it.
+  snapshotQuery(`the handoff from ${req.from||'another tool'}`);
+
   // 1 · dataset (rebinds this dataset's real accession catalog)
-  if(req.dataset && req.dataset!==S.dataset && DATASETS.some(d=>d.id===req.dataset)){
+  if(crossDataset){
     S.dataset=req.dataset;
     PROJECTS=Data.projectsFor(S.dataset);
     ACCESSIONS=Data.accessionsFor(S.dataset);
   }
 
-  // 2 · region
+  // 2 · region  (a region has no union semantics — the newest handoff wins)
   if(req.chr){ S.chr=String(req.chr).startsWith('chr')?req.chr:'chr'+req.chr; }
   const flank=+req.flank||0;
   if(req.start!=null && req.end!=null){
@@ -112,23 +124,83 @@ function applyPendingRequest(){
   //     names / run IDs / composite IDs all work)
   const wanted=[...new Set((req.accessions||[]).filter(Boolean).map(String))];
   const idx=buildAccIndex(); const missing=[];
-  S.selected.clear();
+  const before=new Set(S.selected);          // for the delta report
+  const resolved=new Set();
   wanted.forEach(w=>{
     const hit=idxHit(idx,w) || (w.match(RUN_RE)?idxHit(idx,w.match(RUN_RE)[1]):null);
-    if(hit) hit.forEach(id=>S.selected.add(id)); else missing.push(w);
+    if(hit) hit.forEach(id=>resolved.add(id)); else missing.push(w);
   });
+  if(merge==='replace') S.selected.clear();
+  resolved.forEach(id=>S.selected.add(id));
+
+  let added=0, already=0, removed=0;
+  resolved.forEach(id=>{ if(before.has(id)) already++; else added++; });
+  if(merge==='replace') before.forEach(id=>{ if(!resolved.has(id)) removed++; });
+
   accFilter='';
   S.page=1;
   return {gene:req.gene||'', from:req.from||'SNPFunction', note:req.note||'',
-          requested:wanted.length, selected:S.selected.size, missing};
+          merge, crossDataset, requested:wanted.length,
+          added, already, removed,
+          selected:S.selected.size, total:S.selected.size, missing};
 }
 function inboundBanner(i){
-  return `<div class="from-fn">
+  const delta = (typeof Handoff!=='undefined')
+    ? Handoff.deltaText({added:i.added, already:i.already, removed:i.removed,
+                         missing:i.missing.length, total:i.total})
+    : `<b>${i.selected}</b> of ${i.requested} accession${i.requested===1?'':'s'} selected`;
+  return `<div class="from-fn" id="inboundBanner">
     <b>From ${escAttr(i.from)}</b>
-    <span>${i.gene?`<span class="mono">${escAttr(i.gene)}</span> — `:''}${escAttr(i.note||'carrier accessions')}:
-      <b>${i.selected}</b> of ${i.requested} accession${i.requested===1?'':'s'} preselected${i.missing.length?`, ${i.missing.length} not in this dataset`:''}.</span>
-    <button class="btn" style="margin-left:auto" onclick="runQuery()">${ICONS.dna||''} Build VCF &amp; view</button>
+    <span>${i.gene?`<span class="mono">${escAttr(i.gene)}</span> — `:''}${escAttr(i.note||'carrier accessions')}
+      ${i.merge==='add'?'added to your selection':'replaced your selection'}: ${delta}.
+      ${i.crossDataset?`<br><span class="ho-hint">Dataset changed — accessions are not shared between datasets, so the previous selection could not be kept.</span>`:''}</span>
+    <span class="from-fn-acts">
+      ${undoChip()}
+      <button class="btn" onclick="runQuery()">${ICONS.dna||''} Build VCF &amp; view</button>
+    </span>
   </div>`;
+}
+
+/* =====================================================================
+ *  UNDO  —  one snapshot of the whole query state (dataset, region,
+ *  selection), taken immediately before a handoff or an uploaded list is
+ *  applied. It is deliberately shallow: exactly one step, and it expires
+ *  the moment the user touches the selection by hand or runs the query,
+ *  so a stale Undo button can never sit there waiting to eat real work.
+ * ===================================================================== */
+function snapshotQuery(what){
+  S.undoQuery = { what: what || 'the last change', dataset:S.dataset,
+                  chr:S.chr, start:S.start, end:S.end, selected:[...S.selected] };
+}
+/* call from anything that edits the selection by hand */
+function touchSelection(){
+  if(!S.undoQuery) return;
+  S.undoQuery = null;
+  document.querySelectorAll('.ho-undo').forEach(b=>b.remove());
+}
+function undoChip(){
+  if(!S.undoQuery) return '';
+  return `<button class="btn ghost ho-undo" onclick="undoLastChange()"
+    title="Put the dataset, region and selection back the way they were">Undo</button>`;
+}
+function undoLastChange(){
+  const u=S.undoQuery; if(!u) return;
+  S.undoQuery=null;
+  if(u.dataset && u.dataset!==S.dataset){
+    S.dataset=u.dataset;
+    PROJECTS=Data.projectsFor(S.dataset);
+    ACCESSIONS=Data.accessionsFor(S.dataset);
+  }
+  if(u.chr) S.chr=u.chr;
+  if(u.start!=null) S.start=u.start;
+  if(u.end!=null)   S.end=u.end;
+  S.selected.clear(); (u.selected||[]).forEach(id=>S.selected.add(id));
+  S.results=null;
+  const b=document.getElementById('inboundBanner'); if(b) b.remove();
+  accFilter='';
+  renderDatasets(); renderRegion(); renderAccPicker(); renderRunbar();
+  const n=S.selected.size;
+  uplSay('ok', `Undone — ${escAttr(u.what)} was reverted. Selection is back to <b>${n}</b> accession${n===1?'':'s'}.`);
 }
 
 function renderDatasets(){
@@ -149,6 +221,7 @@ function renderDatasets(){
     </div>`).join('');
 }
 function selectDataset(id){
+  touchSelection();
   S.dataset=id;
   // switch to this dataset's real accession catalog
   PROJECTS   = Data.projectsFor(id);
@@ -328,7 +401,7 @@ function renderAccPicker(){
             <button class="btn primary" id="uplLoadBtn" onclick="loadAccList()" disabled>Load accessions</button>
             <button class="btn" onclick="clearAccUpload()">Clear</button>
           </div>
-          <label class="upl-opt"><input type="checkbox" id="uplReplace" checked> Replace current selection</label>
+          <div class="upl-opt" data-ho-mount data-ho-id="uplReplace"></div>
           <div class="upl-status" id="uplStatus"></div>
           <div class="upl-report" id="uplReport"></div>
         </div>
@@ -337,6 +410,9 @@ function renderAccPicker(){
   // fresh picker (first open or dataset switch): start with the first section open
   openProjects.clear();
   if(PROJECTS[0] && PROJECTS[0].count<=250) openProjects.add(PROJECTS[0].id);
+  // same control, same wording, same session state as the handoff checkbox in
+  // SNPFunction / SNPFold — setting it in one place sets it in all of them
+  if(typeof Handoff!=='undefined') Handoff.sync();
   renderAccList(); renderSelected();
 }
 function accMatch(a){
@@ -414,6 +490,7 @@ function selProject(pid,frac){
 }
 function oneNAMEach(){
   // add one accession per tagged NAM founder (2026 dataset)
+  touchSelection();
   const seen=new Set();
   ACCESSIONS.forEach(a=>{ if(a.namFounder && !seen.has(a.namFounder)){ seen.add(a.namFounder); S.selected.add(a.id); } });
   renderAccList(); renderSelected(); renderRunbar();
@@ -565,14 +642,22 @@ function applyAccList(text, source){
     return;
   }
 
-  const replace=(document.getElementById('uplReplace')||{}).checked;
-  if(replace) S.selected.clear();
+  const merge = (typeof Handoff!=='undefined') ? Handoff.mode()
+              : (((document.getElementById('uplReplace')||{}).checked) ? 'replace' : 'add');
+  snapshotQuery(`the list loaded from ${source}`);
+  const before=new Set(S.selected);
+  if(merge==='replace') S.selected.clear();
   matched.forEach((_,id)=>S.selected.add(id));
 
+  let added=0, already=0, removed=0;
+  matched.forEach((_,id)=>{ if(before.has(id)) already++; else added++; });
+  if(merge==='replace') before.forEach(id=>{ if(!matched.has(id)) removed++; });
+
   const cls = unmatched.length ? 'warn' : 'ok';
-  uplSay(cls, `Loaded <b>${matched.size}</b> of ${considered} entries from <b>${escAttr(source)}</b>`+
-              (unmatched.length?` · <b>${unmatched.length}</b> not recognized`:'')+
-              ` · selection is now <b>${S.selected.size}</b> accessions.`);
+  const delta = (typeof Handoff!=='undefined')
+    ? Handoff.deltaText({added, already, removed, missing:unmatched.length, total:S.selected.size})
+    : `selection is now <b>${S.selected.size}</b> accessions`;
+  uplSay(cls, `Loaded <b>${matched.size}</b> of ${considered} entries from <b>${escAttr(source)}</b> · ${delta}. ${undoChip()}`);
   renderUplReport({matched:matched.size, considered, unmatched, dupes, fanout, source, skippedHeader, applied:true});
 
   renderAccList(); renderSelected(); renderRunbar();
@@ -604,8 +689,7 @@ function injectVersityCSS(){
     .upl-paste{width:100%;box-sizing:border-box;min-height:64px;resize:vertical;border:1px solid var(--line);
       border-radius:8px;padding:7px 9px;font-family:var(--mono);font-size:11.5px;color:var(--ink);background:#fff}
     .upl-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:7px}
-    .upl-opt{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--muted);margin-top:8px;cursor:pointer}
-    .upl-opt input{margin:0}
+    .upl-opt{margin-top:9px}
     .upl-status{font-size:11.5px;margin-top:8px;line-height:1.45}
     .upl-status.ok{color:#176c3a} .upl-status.err{color:#c0362c} .upl-status.warn{color:#8a6d1e}
     .upl-report{margin-top:8px}
@@ -619,6 +703,8 @@ function injectVersityCSS(){
     .from-fn{background:#eef4ff;border:1px solid #cfe0ff;color:#274b8f;border-radius:9px;padding:9px 12px;
       font-size:12.5px;margin-bottom:12px;display:flex;gap:9px;align-items:center;flex-wrap:wrap}
     .from-fn .mono{font-family:var(--mono)}
+    .from-fn-acts{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .from-fn .ho-hint{color:#4a6ca8}
     /* per-row jump links in the Effect column (matches .pe-jump) */
     .effect-cell .fold-jump{font-size:11px;white-space:nowrap;margin-left:2px;
       color:#176c3a;text-decoration:none;border-bottom:1px dotted #9ecdb1}
@@ -626,10 +712,11 @@ function injectVersityCSS(){
   document.head.appendChild(s);
 }
 
-function toggleAcc(id){S.selected.has(id)?S.selected.delete(id):S.selected.add(id);renderAccList();renderSelected();renderRunbar();}
-function allSel(on){ACCESSIONS.forEach(a=>on?S.selected.add(a.id):S.selected.delete(a.id));renderAccList();renderSelected();renderRunbar();}
-function randomSel(p){S.selected.clear();const idx=[...ACCESSIONS.keys()].sort(()=>Math.random()-.5);const n=Math.ceil(ACCESSIONS.length*p);for(let i=0;i<n;i++)S.selected.add(ACCESSIONS[idx[i]].id);renderAccList();renderSelected();renderRunbar();}
-function onePerFounder(){S.selected.clear();const seen=new Set();ACCESSIONS.forEach(a=>{if(!seen.has(a.founder)){seen.add(a.founder);S.selected.add(a.id);}});renderAccList();renderSelected();renderRunbar();}
+/* every one of these is a hand edit, so it expires the pending Undo */
+function toggleAcc(id){touchSelection();S.selected.has(id)?S.selected.delete(id):S.selected.add(id);renderAccList();renderSelected();renderRunbar();}
+function allSel(on){touchSelection();ACCESSIONS.forEach(a=>on?S.selected.add(a.id):S.selected.delete(a.id));renderAccList();renderSelected();renderRunbar();}
+function randomSel(p){touchSelection();S.selected.clear();const idx=[...ACCESSIONS.keys()].sort(()=>Math.random()-.5);const n=Math.ceil(ACCESSIONS.length*p);for(let i=0;i<n;i++)S.selected.add(ACCESSIONS[idx[i]].id);renderAccList();renderSelected();renderRunbar();}
+function onePerFounder(){touchSelection();S.selected.clear();const seen=new Set();ACCESSIONS.forEach(a=>{if(!seen.has(a.founder)){seen.add(a.founder);S.selected.add(a.id);}});renderAccList();renderSelected();renderRunbar();}
 
 /* ---- run bar ---- */
 function renderRunbar(){
@@ -656,6 +743,7 @@ function noticeCard(title, body){
     <p style="color:var(--muted);margin:0 auto;max-width:560px">${body}</p></div>`;
 }
 async function runQuery(){
+  touchSelection();          // the selection is committed — the Undo no longer applies
   const anchor=document.getElementById('resultsAnchor');
   anchor.innerHTML=`<div class="card" style="overflow:hidden"><div class="loading"><div class="spinner"></div><div>Reading HDF5 store and assembling VCF…</div></div></div>`;
   anchor.scrollIntoView({behavior:'smooth',block:'start'});

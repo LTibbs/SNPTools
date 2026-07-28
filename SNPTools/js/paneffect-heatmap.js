@@ -77,13 +77,22 @@
         /* +0.5 width mirrors the original's slight overlap so there are no seams */
         ctx.fillRect((c.x - 1) * cellW, (c.y - 1) * cellH, cellW + 0.5, cellH);
       }
-      if (highlight) {
+      if (highlight && highlight.y != null) {
         const hx = (highlight.x - 1) * cellW, hy = (highlight.y - 1) * cellH;
         ctx.lineWidth = 2;
         ctx.strokeStyle = '#111';
         ctx.strokeRect(hx - 1, hy - 1, cellW + 2, cellH + 2);
         ctx.strokeStyle = '#fff';
         ctx.strokeRect(hx - 2.5, hy - 2.5, cellW + 5, cellH + 5);
+      } else if (highlight && highlight.x != null) {
+        /* position known, but not which row (e.g. the amino-acid substitution
+           couldn't be resolved) — still mark the column so the jump isn't silent */
+        const hx = (highlight.x - 1) * cellW;
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#111';
+        ctx.strokeRect(hx - 1, -1, cellW + 2, H + 2);
+        ctx.strokeStyle = '#fff';
+        ctx.strokeRect(hx - 2.5, -2.5, cellW + 5, H + 5);
       }
     }
     draw();
