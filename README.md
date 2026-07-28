@@ -1,4 +1,4 @@
-# SNPTools — SNPVersity 2.1
+# SNPTools 
 
 > A browser-based suite of tools for exploring maize genomic variation, developed by
 > [MaizeGDB](https://maizegdb.org) and funded by USDA-ARS.
