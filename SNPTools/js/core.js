@@ -90,6 +90,13 @@ const TOOLS = {
 function rnd(a,b){return a+Math.random()*(b-a)}
 function pick(a){return a[Math.floor(Math.random()*a.length)]}
 
+/* ---- MaizeGDB gene model links — shared across tools ---- */
+const MAIZEGDB_GENE_BASE = 'https://www.maizegdb.org/gene_center/gene/';
+function maizegdbGeneURL(g){ return MAIZEGDB_GENE_BASE + encodeURIComponent(g); }
+/* True only for a bare single gene model id — intergenic / boundary loci are
+   encoded as ranges (contain "..") and are not single gene models. */
+function isSingleGeneModel(g){ return !!g && g!=='—' && !String(g).includes('..') && !/\s/.test(g); }
+
 /* ================= SHARED STATE =================
    Cross-tool query context lives here (region + selected accessions) so a
    selection made in one tool can flow into another. Tool-only view-state

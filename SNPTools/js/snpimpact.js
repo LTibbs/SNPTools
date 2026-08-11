@@ -256,7 +256,7 @@
       <div class="tbl-wrap" style="max-height:none">
         <table class="vcf imp">
           <thead><tr>
-            ${th('Gene','gene')}<th>Variant</th>${th('Consequence','consequence')}${th('Domain','domain')}
+            ${th('Gene','gene')}<th data-tt="${COL_TT['Variant']}">Variant</th>${th('Consequence','consequence')}${th('Domain','domain')}
             ${th('PlantCAD1','plantcad','num')}${IMP.sec?th('PlantCAD2','plantcad2','num'):''}${th('ESM','esm','num')}${IMP.sec?th('ESM2','esm2','num')+th('ESM3','esm3','num'):''}${th('Priority','priority')}<th></th>
           </tr></thead>
           <tbody>${rows.map(rowHTML).join('')}</tbody>
@@ -285,10 +285,23 @@
         ${opts.map(o=>`<option value="${o[0]}" ${IMP[key]===o[0]?'selected':''}>${o[1]}</option>`).join('')}
       </select></div>`;
   }
+  const COL_TT = {
+    'Gene':'Gene model associated with the candidate variant.',
+    'Variant':'Genomic change — position and REF to ALT alleles.',
+    'Consequence':'Specific predicted molecular consequence of the change.',
+    'Domain':'Pfam domain containing the affected amino acid, when present.',
+    'PlantCAD1':'PlantCAD DNA language-model score estimating sequence disruption.',
+    'PlantCAD2':'Second-generation PlantCAD DNA score (MaizeGDB 2026).',
+    'ESM':'ESM protein language-model score for the amino-acid substitution.',
+    'ESM2':'ESM2 protein language-model score (MaizeGDB 2026).',
+    'ESM3':'ESM3 protein language-model score (MaizeGDB 2026).',
+    'Priority':'Candidate tier — TOP (strongest), then HIGH, MODERATE, LOW.',
+  };
   function th(label, key, cls){
     const active = IMP.sortKey===key;
     const arrow = active ? (IMP.sortDir>0?' ▲':' ▼') : ' ⇅';
-    return `<th class="sortable ${cls||''} ${active?'on':''}" onclick="IMPACT.sort('${key}')">${label}<span class="arr">${arrow}</span></th>`;
+    const tt = COL_TT[label] ? ` data-tt="${COL_TT[label]}"` : '';
+    return `<th class="sortable ${cls||''} ${active?'on':''}"${tt} onclick="IMPACT.sort('${key}')">${label}<span class="arr">${arrow}</span></th>`;
   }
 
   function rowHTML(r){
@@ -450,7 +463,9 @@
         <div>
           <div class="idh-t">Variant detail</div>
           <div class="idh-meta">
-            <span>Gene: <b class="mono">${r.gene}</b></span>
+            <span>Gene: ${isSingleGeneModel(r.gene)
+              ? `<a class="mono" style="color:var(--blue-600);font-weight:700" href="${maizegdbGeneURL(r.gene)}" target="_blank" rel="noopener" title="MaizeGDB gene page for ${esc(r.gene)}">${esc(r.gene)}</a>`
+              : `<b class="mono">${esc(r.gene)}</b>`}</span>
             <span>Variant: <b class="mono">${r.variant}</b></span>
             <span>${consPill(r)}</span>
             <span>${prioPill(r.priority)}</span>

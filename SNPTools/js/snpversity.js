@@ -32,9 +32,6 @@ function renderVersity(){
       <div class="n">VCF BUILDER & VIEWER · B73 v5</div>
       <h2>Build a variant view across maize accessions</h2>
       <p>Choose a dataset, set a genomic interval, and pick the accessions you want. SNPVersity returns a color-coded variant table and a downloadable VCF — alleles, effects, and DNA/protein language-model scores included.</p>
-      <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
-        <button class="btn" onclick="sendToCompare()">${ICONS.compare||ICONS.grid||''} Send to SNPCompare</button>
-      </div>
     </div></div>
 
     <!-- DATASET -->
@@ -727,8 +724,9 @@ function renderRunbar(){
   const ready=S.selected.size>0 && span>0;
   rb.innerHTML=`
     <div class="summ">
+      <span class="kick${ready?'':' wait'}">${ready?'Ready to run':'Finish steps 1–3 to run'}</span>
       <b>${d.name} ${d.sub}</b> · <span class="mono">${S.chr}:${lo.toLocaleString()}–${hi.toLocaleString()}</span><br>
-      <span style="color:#9fb4d6">${S.selected.size} accessions · ${(span/1e3).toFixed(1)} kb interval · ${span>1e6?'returns a VCF file':'returns an interactive table'}</span>
+      <span>${S.selected.size} accessions · ${(span/1e3).toFixed(1)} kb interval · ${span>1e6?'returns a VCF file':'returns an interactive table'}</span>
     </div>
     <div class="spacer"></div>
     <button class="btn primary" ${ready?'':'disabled'} onclick="runQuery()">
@@ -913,10 +911,10 @@ function renderTable(){
     ${genesPanel()}
     <div class="tbl-wrap"><table class="vcf">
       <thead><tr>
-        <th>CHR</th><th>POS</th><th class="num">REF</th><th class="num">ALT</th>
-        <th>Gene model</th><th>Effect</th><th>SNPEff Impact</th><th>Domain</th>
-        <th class="num">MQ</th><th class="num">COMP</th><th class="num">maxR²</th><th class="num">MAF</th>
-        <th class="num">PlantCAD1</th><th class="num">PlantCAD2</th><th class="num">ESM1</th><th class="num">ESM2</th><th class="num">ESM3</th>
+        <th data-tt="Chromosome — reference chromosome containing the variant.">CHR</th><th data-tt="Position — 1-based coordinate on B73 v5.">POS</th><th class="num" data-tt="Reference allele in B73 v5.">REF</th><th class="num" data-tt="Alternate allele represented by this row.">ALT</th>
+        <th data-tt="B73 v5 gene model overlapping the variant.">Gene model</th><th data-tt="Predicted consequence — e.g. missense, synonymous, intron, frameshift.">Effect</th><th data-tt="Predicted severity — HIGH, MODERATE, LOW, or MODIFIER.">SNPEff Impact</th><th data-tt="Pfam protein domain overlapping the affected residue, when available.">Domain</th>
+        <th class="num" data-tt="Mapping quality — confidence that reads aligned to the correct location; higher is better.">MQ</th><th class="num" data-tt="Completeness — fraction of accessions with a non-missing call at this site.">COMP</th><th class="num" data-tt="Maximum LD r² — linkage-disequilibrium correlation; closer to 1 is stronger.">maxR²</th><th class="num" data-tt="Minor-allele frequency — frequency of the less common allele (0 to 0.5).">MAF</th>
+        <th class="num" data-tt="PlantCAD DNA language-model score; more extreme values are more disruptive.">PlantCAD1</th><th class="num" data-tt="Second-generation PlantCAD DNA score (MaizeGDB 2026 datasets).">PlantCAD2</th><th class="num" data-tt="ESM protein language-model score for the amino-acid change.">ESM1</th><th class="num" data-tt="ESM2 protein language-model score (MaizeGDB 2026 datasets).">ESM2</th><th class="num" data-tt="ESM3 protein language-model score (MaizeGDB 2026 datasets).">ESM3</th>
         ${accs.map(a=>`<th class="acc-th" style="height:${thH}px" title="${escAttr((a.projTitle||a.proj||'')+' — '+a.id)}"><span class="proj-bar" style="background:${a.projColor};height:8px" title="${escAttr(a.projTitle||a.proj||'')}"></span><span class="v">${a.id}</span></th>`).join('')}
       </tr></thead>
       <tbody>
@@ -957,7 +955,7 @@ function rowHTML(r){
     <td class="c-pos"><a class="gene-link" href="${link}" target="_blank" rel="noopener">${r.pos.toLocaleString()}</a></td>
     <td class="c-allele c-ref" data-tt="${escAttr(alleleTT(r.ref,'REF allele'))}">${escAttr(alleleDisp(r.ref))}</td>
     <td class="c-allele c-alt" data-tt="${escAttr(alleleTT(r.alt,'ALT allele'))}">${escAttr(alleleDisp(r.alt))}</td>
-    <td>${r.gene}</td>
+    <td>${geneCell(r.gene)}</td>
     <td class="effect-cell">${eff}</td>
     <td><span class="pill ${r.impact.toLowerCase()}">${r.impact}</span></td>
     <td>${domTag(r.domain)}</td>
@@ -973,9 +971,19 @@ function rowHTML(r){
     }).join('')}
   </tr>`;
 }
+/* "Gene model" table cell: link real gene models to their MaizeGDB page.
+   maizegdbGeneURL / isSingleGeneModel are shared helpers defined in core.js.
+   Intergenic spans and the "—" placeholder stay as plain text. */
+function geneCell(g){
+  if(!g || g==='—') return '<span style="color:var(--faint)">—</span>';
+  return isSingleGeneModel(g)
+    ? `<a class="gene-link" href="${maizegdbGeneURL(g)}" target="_blank" rel="noopener" title="MaizeGDB gene page for ${escAttr(g)}">${g}</a>`
+    : g;
+}
 function genesPanel(){
   const rows=(S.results&&S.results.rows)||[];
-  const genes=[...new Set(rows.map(r=>r.gene).filter(g=>g&&g!=='—'))].sort();
+  // Only single, real gene models — intergenic / boundary spans dropped (isSingleGeneModel, core.js).
+  const genes=[...new Set(rows.map(r=>r.gene).filter(isSingleGeneModel))].sort();
   if(!genes.length) return '';
   const jb=g=>`https://jbrowse.maizegdb.org/index.html?data=B73&loc=${encodeURIComponent(g)}`;
   const items=genes.map(g=>`<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:5px 2px;border-bottom:1px solid #eef1f5">

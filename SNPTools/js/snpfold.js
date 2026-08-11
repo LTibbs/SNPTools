@@ -22,6 +22,7 @@
     selId: null,
     colorMode: 'plddt',     // plddt | domain | impact
     showVar: true,
+    highlight: new Set(),   // variant ids force-shown in the 3D view regardless of showVar
     viewer: null, libState: 'idle',
     dataset: null, sec: false,  // sec = show PlantCAD2/ESM2/ESM3 (MaizeGDB 2026 only)
     structSource: null,  // 'alphafold' | 'boltz' | 'esmfold' | null — which folder the current FD.struct/FD.pdb came from
@@ -31,6 +32,9 @@
     sort: { key: null, dir: 'asc' },     // variant-table sort: column key + direction ('asc'|'desc'); null key = file order
     pendingVariant: null,// {chr,pos,ref,alt,sub,…} handed over by another tool; selected once variants are in hand
     truncation: null,    // {structureLength,maxVariantResidue,beyondCount,sourceLabel} when variants extend past the loaded model
+    iupred: null,        // {disorder:[...], anchor2:[...], isoform} — IUPred2A scores for the loaded gene's matching isoform
+    sites: null,         // {isoform, rows:[...], byResidue:Map} — InterProScan site/feature annotations (data/results.sites.tsv)
+    trackZoom: 1,         // Protein browser horizontal zoom multiplier; 1 = fit-to-container
     root: null,          // persistent DOM container — survives navigation to other tools
     loaded: false,       // a gene's heavy content is (being) rendered into root
     loadedGene: null,    // which gene that content is for
@@ -224,6 +228,16 @@
     const name = pfam ? text.replace(/\s*\(?\s*PF\d{4,6}\s*\)?\s*/i, ' ').trim() : text;
     return { name:name || text, pfam, kind:'domain', source:'variant' };
   }
+  /* Pull a bare Pfam accession (PF#####) out of whatever the domain's
+     pfam/name field holds, so the linear track can link out to InterPro
+     even when the field is formatted as "Name (PF10275)" rather than a
+     bare accession. Returns null if no Pfam accession is present. */
+  function pfamAccessionOf(d){
+    if (!d) return null;
+    const m = String(d.pfam || d.name || '').match(/(PF\d{4,6})/i);
+    return m ? m[1].toUpperCase() : null;
+  }
+  function interproHref(pfam){ return 'https://www.ebi.ac.uk/interpro/entry/pfam/' + pfam + '/'; }
   function normalizeDomainRecord(raw){
     if (!raw) return null;
     if (Array.isArray(raw)){
@@ -1009,6 +1023,9 @@
 
     FD.root.innerHTML = datasetChooser() + searchBar() + `<div class="loading" style="padding:48px;text-align:center">
       <div class="spinner"></div><div>Loading coding variants for ${s.gene}…</div></div>`;
+    FD.iupred = null;
+    FD.sites = null;
+    FD.trackZoom = 1;
     try {
       /* Passing the dataset as a second argument is backward-compatible in JavaScript:
          older one-argument implementations simply ignore it. */
@@ -1016,8 +1033,12 @@
       const functionPromise = typeof Data.geneFunction === 'function'
         ? Promise.resolve(Data.geneFunction(FD.gene, FD.dataset)).catch(()=>null)
         : Promise.resolve(null);
+      const iupredPromise = loadIupredForGene(FD.gene, s.length).catch(()=>null);
+      const sitesPromise = loadSitesForGene(FD.gene, s.length).catch(()=>null);
 
-      const [variants, fn] = await Promise.all([variantsPromise, functionPromise]);
+      const [variants, fn, iupred, sites] = await Promise.all([variantsPromise, functionPromise, iupredPromise, sitesPromise]);
+      FD.iupred = iupred || null;
+      FD.sites = sites || null;
       const [geneModel, domainRecords] = await Promise.all([
         loadFoldGeneModel(fn),
         loadCanonicalDomainRecords(fn),
@@ -1072,8 +1093,17 @@
       ${truncationWarningHTML()}
 
       <!-- linear protein browser -->
-      <div class="sec" style="margin-top:24px"><div class="bar"></div><div><h2 style="font-size:16px">Protein browser</h2>
-        <p>Variants (lollipops, height = severity) over domains, secondary structure, and pLDDT. Click a variant.</p></div></div>
+      <div class="sec" style="margin-top:24px"><div class="bar"></div><div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap">
+        <div><h2 style="font-size:16px">Protein browser</h2>
+        <p>Variants (lollipops, height = severity) over domains, secondary structure, pLDDT, and InterProScan sites. Click a variant. Scroll the track to pan; zoom to see single residues.</p></div>
+        <div class="seg" style="flex:none">
+          <button class="seg-b" title="Zoom out" onclick="FOLD.zoomTrack(-1)">−</button>
+          <span id="foldZoomLabel" style="padding:0 8px;font-family:var(--mono);font-size:12px;align-self:center">${(Math.max(1,Math.min(20,FD.trackZoom||1))).toFixed(0)}×</span>
+          <button class="seg-b" title="Zoom in" onclick="FOLD.zoomTrack(1)">+</button>
+          <button class="seg-b" title="Reset zoom" onclick="FOLD.zoomTrack(0)">Reset</button>
+        </div>
+        <button class="btn ghost" title="Download the protein browser track as a PNG" onclick="FOLD.downloadTrackImage()">Download image</button>
+      </div></div>
       <div class="card pad">
         <div class="fold-track" id="foldTrack">${trackSVG()}</div>
         <div class="fold-legend" style="display:flex;flex-wrap:wrap;gap:10px 34px;align-items:flex-start">
@@ -1096,6 +1126,10 @@
             <span class="lg"><span class="sw" style="background:#ffdb13"></span>50–70</span>
             <span class="lg"><span class="sw" style="background:#ff7d45"></span>&lt;50</span>
           </div>
+          <div class="lg-group" style="display:flex;flex-direction:column;align-items:flex-start;gap:4px">
+            <div class="lg-title" style="font-weight:600;color:var(--ink)">InterProScan sites (by program):</div>
+            ${siteDisplayPrograms().map(p=>`<span class="lg"><span class="sw" style="background:${siteProgramColor(p)}"></span>${escFold(siteProgramLabel(p))}</span>`).join('')}
+          </div>
         </div>
       </div>
 
@@ -1111,6 +1145,7 @@
             <label class="chk"><input type="checkbox" ${FD.showVar?'checked':''} onchange="FOLD.toggleVar(this.checked)"> Variant residues</label>
             <span style="margin-left:auto">${structSourceBadge()}</span>
             <button class="btn ghost" onclick="FOLD.reset()">Reset view</button>
+            <button class="btn ghost" title="Download a transparent PNG of the current 3D view" onclick="FOLD.downloadImage()">Download image</button>
           </div>
           <div id="fold3d" class="fold-3d"></div>
         </div>
@@ -1122,6 +1157,10 @@
         <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;width:100%">
           <h2 style="font-size:16px;margin:0">Coding variants on this gene</h2>
           <span style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap">
+            ${FD.variants && FD.variants.length?`<button class="btn ghost" title="Download this table as CSV"
+              onclick="FOLD.downloadTable('csv')">${ICONS.download||''} CSV</button>
+            <button class="btn ghost" title="Download this table as TSV"
+              onclick="FOLD.downloadTable('tsv')">${ICONS.download||''} TSV</button>`:''}
             ${FD.gene?`<button class="btn" title="Open ${escFold(FD.gene)}'s functional dossier in SNPFunction"
               onclick="FOLD.toFunction()">${ICONS.leaf||ICONS.star||''} Send gene to SNPFunction</button>`:''}
             ${anyCarriers()?`<button class="btn"
@@ -1163,9 +1202,25 @@
   }
   function trackSVG(){
     const s=FD.struct, N=s.length;
-    const H=176, lolliTop=8, lolliH=58, base=lolliTop+lolliH;      // lollipop baseline
+    const lolliTop=8, lolliH=58, base=lolliTop+lolliH;      // lollipop baseline
     const domY=base+6, domH=18, ssY=domY+domH+22, ssH=12, pY=ssY+ssH+10, pH=12;
     const maxSev=10;
+    /* InterProScan site/feature lanes — one horizontal lane per analysis program
+       (CDD, PIRSR, SFLD), stacked under the pLDDT strip, mirroring how
+       InterProScan's own site view groups hits by member database. All known
+       programs are shown even when the current protein has no hits, so the
+       option stays visible; empty lanes are labelled "none in this protein". */
+    const sitePrograms = siteDisplayPrograms();
+    const siteLaneH=9, siteLaneGap=10, sitesY0=pY+pH+24;
+    const H = sitePrograms.length ? sitesY0 + sitePrograms.length*(siteLaneH+siteLaneGap) + 2 : 176;
+    /* Horizontal zoom: the viewBox stays a fixed 1000x{H} coordinate system,
+       but preserveAspectRatio="none" plus an explicit pixel height lets width
+       stretch independently — so zooming widens the track (scrollable via
+       .fold-track{overflow-x:auto}) without inflating its height. Tick density
+       increases with zoom so residue numbers stay legible down to single
+       residues when fully zoomed in. */
+    const zoom = Math.max(1, Math.min(20, FD.trackZoom || 1));
+    const tickStep = zoom>=8 ? 1 : zoom>=4 ? 5 : zoom>=2 ? 25 : 100;
     let g='';
 
     // pLDDT strip (RLE by band)
@@ -1174,6 +1229,22 @@
       g+=`<rect x="${x1.toFixed(1)}" y="${pY}" width="${Math.max(.6,x2-x1).toFixed(1)}" height="${pH}" fill="${seg.key}"/>`;
     });
     g+=`<text x="0" y="${pY+pH+11}" class="tlab">pLDDT confidence</text>`;
+
+    // InterProScan site/feature lanes, one per program
+    sitePrograms.forEach((program,pi)=>{
+      const laneY = sitesY0 + pi*(siteLaneH+siteLaneGap);
+      const col = siteProgramColor(program);
+      const rows = (FD.sites && FD.sites.rows) ? FD.sites.rows.filter(r=>r.program===program) : [];
+      g+=`<text x="0" y="${laneY-2}" class="tlab">${escFold(siteProgramLabel(program))}${rows.length?'':' — none in this protein'}</text>`;
+      rows.forEach(r=>{
+        const from=Math.max(1,r.siteStart), to=Math.max(from,r.siteEnd);
+        if (from>N) return;
+        const x1=x(from), x2=x(Math.min(to,N));
+        const w=Math.max(1.6, x2-x1);
+        const label = escFold(`${program} · ${r.signature} · ${siteActivityText(r.description)||r.residue+from}`);
+        g+=`<rect class="site-hit" data-tt="${label}" x="${x1.toFixed(1)}" y="${laneY}" width="${w.toFixed(1)}" height="${siteLaneH}" rx="2" fill="${col}"/>`;
+      });
+    });
 
     // secondary structure
     ssRuns(s.ss).forEach(r=>{
@@ -1188,6 +1259,15 @@
     (s.domains||[]).forEach((d,i)=>{
       const x1=x(d.start), x2=x(d.end), w=x2-x1, mid=x1+w/2;
       const label = escFold([d.name, d.pfam].filter(Boolean).join(' · '));
+      /* Pfam-backed domains link out to their InterPro entry on click,
+         opened in a new tab so the browser stays put. Regions / hits
+         without a resolvable Pfam accession stay inert (no link, default
+         cursor) rather than pointing at a broken URL. */
+      const pfam = d.kind==='region' ? null : pfamAccessionOf(d);
+      const gAttrs = pfam
+        ? ` class="dom-link" tabindex="0" role="link" data-tt="${label} · view ${pfam} on InterPro ↗" onclick="FOLD.openDomain('${pfam}')" onkeydown="if(event.key==='Enter')FOLD.openDomain('${pfam}')"`
+        : ` data-tt="${label}"`;
+      g+=`<g${gAttrs}>`;
       if (d.kind==='region'){
         g+=`<rect x="${x1.toFixed(1)}" y="${domY+3}" width="${w.toFixed(1)}" height="${domH-6}" rx="3" fill="#eef1f6" stroke="#d3dae6" stroke-dasharray="3 2"/>`;
         g+=`<text x="${mid.toFixed(1)}" y="${domY+domH-4}" class="dlab" text-anchor="middle">${label}</text>`;
@@ -1195,6 +1275,7 @@
         g+=`<rect x="${x1.toFixed(1)}" y="${domY}" width="${w.toFixed(1)}" height="${domH}" rx="5" fill="${DOM_FILL[i%DOM_FILL.length]}" stroke="#bcd0f5"/>`;
         g+=`<text x="${mid.toFixed(1)}" y="${domY+domH-5}" class="dlab" text-anchor="middle">${label}</text>`;
       }
+      g+=`</g>`;
     });
     /* If the canonical interval file has no matching key, SNPVersity's
        per-variant domain hit still appears at the converted residue as a
@@ -1207,16 +1288,35 @@
         if (resi==null || resi>N || !text) return;
         const key=resi+'|'+text; if (seenHits.has(key)) return; seenHits.add(key);
         const xx=x(resi), label=escFold(text);
-        g+=`<g data-tt="${label} · domain hit at residue ${resi}">`;
+        const hitPfam = pfamAccessionOf({name:text});
+        const hitAttrs = hitPfam
+          ? ` class="dom-link" tabindex="0" role="link" data-tt="${label} · domain hit at residue ${resi} · view ${hitPfam} on InterPro ↗" onclick="FOLD.openDomain('${hitPfam}')" onkeydown="if(event.key==='Enter')FOLD.openDomain('${hitPfam}')"`
+          : ` data-tt="${label} · domain hit at residue ${resi}"`;
+        g+=`<g${hitAttrs}>`;
         g+=`<rect x="${(xx-4).toFixed(1)}" y="${domY}" width="8" height="${domH}" rx="3" fill="#fff" stroke="#6d7fa7" stroke-width="1.4" stroke-dasharray="2 1"/>`;
         g+=`<text x="${xx.toFixed(1)}" y="${domY+domH+10}" class="dlab" text-anchor="middle">${label}</text></g>`;
       });
     }
 
-    // ruler ticks
-    for (let r=1;r<=N;r+=100){ const xx=x(r);
+    // ruler ticks — keep the fine tick marks at high zoom (down to every residue),
+    // but the whole SVG (text included) scales with zoom, so residue-number labels
+    // can't get denser without colliding. Label only every Nth tick, spaced by a
+    // fixed user-unit gap wide enough for a multi-digit number; this adapts to the
+    // protein length and prevents the 4×/8× label overlap.
+    const LABEL_GAP_U = 28;                                  // user-units to reserve per label
+    const tickGap = tickStep * W / Math.max(1, N-1);         // user-units between adjacent ticks
+    const labelEvery = Math.max(1, Math.ceil(LABEL_GAP_U / tickGap)); // label 1 in labelEvery ticks
+    const labelGap = labelEvery * tickGap;                   // user-units between drawn labels
+    let ti=0, lastLabelX=-Infinity;
+    for (let r=1;r<=N;r+=tickStep, ti++){ const xx=x(r);
       g+=`<line x1="${xx.toFixed(1)}" y1="${base}" x2="${xx.toFixed(1)}" y2="${base+3}" stroke="#aab4c4"/>`;
-      g+=`<text x="${xx.toFixed(1)}" y="${base-3}" class="rlab">${r}</text>`;
+      if (ti % labelEvery === 0){ g+=`<text x="${xx.toFixed(1)}" y="${base-3}" class="rlab">${r}</text>`; lastLabelX=xx; }
+    }
+    // always mark the final residue; only label it if the last label isn't too close
+    { const xx=x(N);
+      g+=`<line x1="${xx.toFixed(1)}" y1="${base}" x2="${xx.toFixed(1)}" y2="${base+3}" stroke="#aab4c4"/>`;
+      if (xx - lastLabelX >= labelGap*0.6)
+        g+=`<text x="${xx.toFixed(1)}" y="${base-3}" class="rlab" text-anchor="end">${N}</text>`;
     }
     g+=`<line x1="0" y1="${base}" x2="${W}" y2="${base}" stroke="#dde3ec"/>`;
 
@@ -1242,7 +1342,7 @@
       g+=`</g>`;
     });
 
-    return `<svg viewBox="0 0 ${W} ${H}" class="track-svg" preserveAspectRatio="xMinYMin meet">${g}</svg>`;
+    return `<svg viewBox="0 0 ${W} ${H}" class="track-svg" preserveAspectRatio="xMinYMin meet" style="width:${(zoom*100).toFixed(0)}%">${g}</svg>`;
   }
 
   /* ---------- PanEffect jump ---------- */
@@ -1260,6 +1360,186 @@
     const sub = `${v.ref||''}${v.resi}${v.alt||''}`;
     return ` <a class="pe-jump" href="#" title="View ${escFold(sub)} in PanEffect"
       onclick="event.stopPropagation();FOLD.panEffect('${v.id}');return false;">effects ↗</a>`;
+  }
+
+  /* ---------- IUPred2A intrinsic disorder / Anchor2 ----------
+     Per-isoform precomputed scores, one file per protein isoform, under
+     data/B73_iupred2a_data_28april2026/<gene>_P0NN_iupred2a_results_<date>.txt.
+     We probe isoforms P001..P020 and prefer the one whose residue count matches
+     the loaded structure's length exactly (falling back to the first isoform
+     found if none match, so a value still shows even off-length). */
+  const IUPRED_DIR = 'data/B73_iupred2a_data_28april2026/';
+  const IUPRED_DATE = '2026-04-28';
+  const IUPRED_MAX_ISOFORM = 20;
+  function parseIupredText(text){
+    const disorder = [], anchor2 = [];
+    const lines = String(text || '').split('\n');
+    for (const line of lines){
+      if (!line || line[0] === '#') continue;
+      const parts = line.split('\t');
+      if (parts.length < 4) continue;
+      const d = Number(parts[2]), a = Number(parts[3]);
+      disorder.push(Number.isFinite(d) ? d : null);
+      anchor2.push(Number.isFinite(a) ? a : null);
+    }
+    return disorder.length ? { disorder, anchor2 } : null;
+  }
+  async function loadIupredForGene(gene, structLen){
+    if (!gene || typeof fetch !== 'function') return null;
+    let fallback = null;
+    for (let i = 1; i <= IUPRED_MAX_ISOFORM; i++){
+      const iso = 'P' + String(i).padStart(3, '0');
+      const url = `${IUPRED_DIR}${gene}_${iso}_iupred2a_results_${IUPRED_DATE}.txt`;
+      let text = null;
+      try {
+        const resp = await fetch(url);
+        if (!resp.ok) continue;
+        text = await resp.text();
+      } catch (e) { continue; }
+      const parsed = parseIupredText(text);
+      if (!parsed) continue;
+      if (!fallback) fallback = { isoform: iso, ...parsed };
+      if (structLen && parsed.disorder.length === structLen) return { isoform: iso, ...parsed };
+    }
+    return fallback;
+  }
+  function iupredAt(resi){
+    const r = finiteNumber(resi);
+    if (r == null || !FD.iupred) return null;
+    const i = r - 1;
+    if (i < 0 || i >= FD.iupred.disorder.length) return null;
+    return { disorder: FD.iupred.disorder[i], anchor2: FD.iupred.anchor2[i] };
+  }
+  function iupredCell(val){
+    if (val == null || !Number.isFinite(val)) return '<span style="color:var(--faint)">—</span>';
+    const disordered = val >= 0.5;
+    const bg = disordered ? '#fdeeea' : '#eaf1fd';
+    const fg = disordered ? '#a03d1a' : '#1a4fa0';
+    return `<span class="iupred-chip" style="background:${bg};color:${fg}">${val.toFixed(2)}</span>`;
+  }
+
+  /* ---------- InterProScan site/feature annotations ----------
+     data/results.sites.tsv is one header-less standard InterProScan "sites" TSV
+     for every isoform of every gene (12 tab-delimited columns: protein_id, md5,
+     seq_length, analysis[-version], signature, sig_start, sig_end, group,
+     residue, site_start, site_end, description). It's ~55MB / 460k rows, so we
+     fetch and index it once (lazily, on first use) rather than per gene. */
+  const SITES_URL = 'data/results.sites.tsv';
+  const SITE_PROGRAM_COLOR = { CDD:'#7a4fd6', PIRSR:'#0f9d78', SFLD:'#c2740c' };
+  function siteProgramOf(analysis){
+    const m = /^([A-Za-z]+)/.exec(String(analysis||''));
+    return m ? m[1] : String(analysis||'');
+  }
+  function siteProgramColor(program){ return SITE_PROGRAM_COLOR[program] || '#5b6b8c'; }
+  /* Full member-database names so the legend and track lanes spell each program
+     out instead of showing only the InterProScan abbreviation. */
+  const SITE_PROGRAM_NAME = {
+    CDD:   'Conserved Domains Database',
+    PIRSR: 'PIR Site Rules',
+    SFLD:  'Structure–Function Linkage Database',
+  };
+  function siteProgramLabel(program){
+    const n = SITE_PROGRAM_NAME[program];
+    return n ? `${program} (${n})` : program;
+  }
+  /* Programs shown in the legend and track even when the current protein has no
+     hits, so users can see the InterProScan-sites option exists. Known set
+     first, then any extra program present in the loaded data. */
+  const SITE_PROGRAMS_ALL = ['CDD','PIRSR','SFLD'];
+  function siteDisplayPrograms(){
+    const extra = ((FD.sites && FD.sites.programs) || []).filter(p=>!SITE_PROGRAMS_ALL.includes(p));
+    return SITE_PROGRAMS_ALL.concat(extra);
+  }
+  /* cleans up the raw InterProScan description text for display: SFLD rows are
+     emitted as "null: <text>" when there's no site type — drop that filler. */
+  function siteActivityText(desc){
+    const s = String(desc||'').trim();
+    return s.replace(/^null:\s*/i, '');
+  }
+  let sitesIndexPromise = null;
+  function ensureSitesIndex(){
+    if (sitesIndexPromise) return sitesIndexPromise;
+    sitesIndexPromise = (async () => {
+      if (typeof fetch !== 'function') return new Map();
+      let text;
+      try {
+        const resp = await fetch(SITES_URL);
+        if (!resp.ok) return new Map();
+        text = await resp.text();
+      } catch (e) { console.warn('InterProScan sites load failed', e); return new Map(); }
+      /* index by base gene id -> isoform suffix (e.g. "P002") -> row[] */
+      const genes = new Map();
+      const lines = text.split('\n');
+      for (const line of lines){
+        if (!line) continue;
+        const f = line.split('\t');
+        if (f.length < 12) continue;
+        const m = /^(.*)_([A-Za-z]\d+)$/.exec(f[0]);
+        if (!m) continue;
+        const [, gene, iso] = m;
+        const row = {
+          length: Number(f[2]), analysis: f[3], program: siteProgramOf(f[3]),
+          signature: f[4], sigStart: Number(f[5]), sigEnd: Number(f[6]),
+          group: f[7], residue: f[8], siteStart: Number(f[9]), siteEnd: Number(f[10]),
+          description: f[11],
+        };
+        let byIso = genes.get(gene); if (!byIso){ byIso = new Map(); genes.set(gene, byIso); }
+        let rows = byIso.get(iso); if (!rows){ rows = []; byIso.set(iso, rows); }
+        rows.push(row);
+      }
+      return genes;
+    })();
+    return sitesIndexPromise;
+  }
+  /* picks the isoform whose recorded seq_length matches the loaded structure
+     exactly, falling back to whichever isoform has the most site rows. */
+  async function loadSitesForGene(gene, structLen){
+    if (!gene) return null;
+    const genes = await ensureSitesIndex();
+    const byIso = genes.get(gene);
+    if (!byIso || !byIso.size) return null;
+    let bestIso = null, bestRows = null;
+    for (const [iso, rows] of byIso){
+      if (structLen && rows[0] && rows[0].length === structLen) { bestIso = iso; bestRows = rows; break; }
+      if (!bestRows || rows.length > bestRows.length) { bestIso = iso; bestRows = rows; }
+    }
+    if (!bestRows) return null;
+    const byResidue = new Map();
+    const programs = new Set();
+    bestRows.forEach(r => {
+      programs.add(r.program);
+      for (let p = r.siteStart; p <= r.siteEnd; p++){
+        let list = byResidue.get(p); if (!list){ list = []; byResidue.set(p, list); }
+        list.push(r);
+      }
+    });
+    return { isoform: bestIso, rows: bestRows, byResidue, programs: [...programs].sort() };
+  }
+  function sitesAt(resi){
+    const r = finiteNumber(resi);
+    if (r == null || !FD.sites) return null;
+    return FD.sites.byResidue.get(r) || null;
+  }
+  function activityCell(resi){
+    const hits = sitesAt(resi);
+    if (!hits || !hits.length) return '<span style="color:var(--faint)">—</span>';
+    const seen = new Set();
+    const parts = [];
+    hits.forEach(h => {
+      const txt = siteActivityText(h.description);
+      if (!txt || seen.has(txt)) return;
+      seen.add(txt);
+      parts.push(`<span class="activity-chip" style="border-color:${siteProgramColor(h.program)}" title="${escFold(h.program+' · '+h.signature)}">${escFold(txt)}</span>`);
+    });
+    return parts.length ? parts.join(' ') : '<span style="color:var(--faint)">—</span>';
+  }
+
+  /* ---------- variant table: CSV / TSV export ---------- */
+  function csvEscape(value, delim){
+    const s = String(value == null ? '' : value);
+    if (s.includes(delim) || s.includes('"') || s.includes('\n') || s.includes('\r'))
+      return '"' + s.replace(/"/g, '""') + '"';
+    return s;
   }
 
   /* ---------- variant table: sortable column model ----------
@@ -1292,6 +1572,15 @@
       get:v => modelScore(v, 'esm2') },
     { key:'esm3',        label:'ESM3',        type:'num', num:true, sec:true,
       get:v => modelScore(v, 'esm3') },
+    { key:'disorder',    label:'IUPred2', type:'num', num:true,
+      get:v => { const c = iupredAt(v.resi); return c ? c.disorder : null; } },
+    { key:'anchor2',     label:'Anchor2',     type:'num', num:true,
+      get:v => { const c = iupredAt(v.resi); return c ? c.anchor2 : null; } },
+    { key:'activity',    label:'Activity',    type:'str',
+      get:v => { const hits = sitesAt(v.resi); if (!hits || !hits.length) return null;
+                 const seen = new Set(); const parts = [];
+                 hits.forEach(h => { const t = siteActivityText(h.description); if (t && !seen.has(t)){ seen.add(t); parts.push(t); } });
+                 return parts.length ? parts.join('; ') : null; } },
     { key:'priority',    label:'Priority',    type:'num', desc1:true,
       get:v => { const p = v.priority ? PRIO_RANK[String(v.priority).toLowerCase()] : null;
                  return p == null ? null : p; } },
@@ -1327,17 +1616,36 @@
       .map(x => x.v);
   }
 
+  const FOLD_TT = {
+    variant:'The coding change at this residue (protein substitution).',
+    consequence:'Predicted molecular consequence of the change.',
+    resi:'Residue — protein position of the affected amino acid.',
+    domain:'Pfam domain overlapping the affected residue, when present.',
+    plddt:'Local pLDDT — AlphaFold per-residue confidence (0 to 100); higher is more reliable.',
+    ss:'Secondary structure at the residue (helix, sheet, or loop).',
+    plantcad:'PlantCAD DNA language-model score for the change.',
+    plantcad2:'Second-generation PlantCAD DNA score (MaizeGDB 2026).',
+    esm:'ESM protein language-model score for the substitution.',
+    esm2:'ESM2 protein language-model score (MaizeGDB 2026).',
+    esm3:'ESM3 protein language-model score (MaizeGDB 2026).',
+    disorder:'IUPred2 — predicted intrinsic disorder at the residue (0 to 1); higher is more disordered.',
+    anchor2:'ANCHOR2 — likelihood the residue lies in a disordered binding region (0 to 1).',
+    activity:'Annotated functional site at this residue (e.g. active or binding site), when present.',
+    priority:'Integrated evidence tier — TOP, HIGH, MODERATE, LOW.',
+    carriers:'Number of accessions carrying this variant (heterozygous plus homozygous).',
+  };
   function tableHeadHTML(){
     return '<tr>' + foldVisibleCols().map(c => {
       const on = FD.sort.key === c.key;
       const arrow = on ? (FD.sort.dir === 'desc' ? '▼' : '▲') : '↕';
-      const tip = on
-        ? `Sorted ${FD.sort.dir === 'desc' ? 'high to low' : 'low to high'} — click to reverse`
-        : `Sort by ${c.label}`;
-      return `<th class="fold-th${c.num ? ' num' : ''}${on ? ' sorted' : ''}" title="${escFold(tip)}"
+      const def = FOLD_TT[c.key] || c.label;
+      const sortNote = on
+        ? (FD.sort.dir === 'desc' ? ' · sorted high→low, click to reverse' : ' · sorted low→high, click to reverse')
+        : ' · click to sort';
+      return `<th class="fold-th${c.num ? ' num' : ''}${on ? ' sorted' : ''}" data-tt="${escFold(def + sortNote)}"
         aria-sort="${on ? (FD.sort.dir === 'desc' ? 'descending' : 'ascending') : 'none'}"
         onclick="FOLD.sortBy('${c.key}')"><span class="fold-th-in">${escFold(c.label)}<span class="fold-ar">${arrow}</span></span></th>`;
-    }).join('') + '<th class="fold-send-th"></th></tr>';
+    }).join('') + '<th class="fold-send-th" data-tt="Force-show this residue in the 3D view, independent of the Variant residues toggle.">3D</th><th class="fold-send-th"></th></tr>';
   }
 
   /* ---------- variant table ---------- */
@@ -1357,12 +1665,19 @@
       ${FD.sec?`<td class="num">${scoreCell(modelScore(v, 'plantcad2'))}</td>`:''}
       <td class="num">${scoreCell(modelScore(v, 'esm'))}</td>
       ${FD.sec?`<td class="num">${scoreCell(modelScore(v, 'esm2'))}</td><td class="num">${scoreCell(modelScore(v, 'esm3'))}</td>`:''}
+      <td class="num">${iupredCell(iupredAt(v.resi)?.disorder)}</td>
+      <td class="num">${iupredCell(iupredAt(v.resi)?.anchor2)}</td>
+      <td>${activityCell(v.resi)}</td>
       <td>${v.priority?`<span class="prio ${v.priority.toLowerCase()}">${v.priority}</span>`:'<span style="color:var(--faint)">—</span>'}</td>
       <td style="text-align:center">${carrierBtn(v, cr, openC)}</td>
+      <td style="text-align:center" onclick="event.stopPropagation()">
+        <input type="checkbox" title="Highlight this residue in the 3D view even if Variant residues is hidden"
+          ${FD.highlight.has(v.id)?'checked':''} onchange="FOLD.toggleHighlight('${v.id}', this.checked)">
+      </td>
       <td class="fold-send">${sendBtn(v, cr)}</td>
     </tr>${openC?carrierRow(v, cr):''}`;
   }
-  function foldCols(){ return foldVisibleCols().length + 1; }   // colspan for the expanded carrier row (+ send column)
+  function foldCols(){ return foldVisibleCols().length + 2; }   // colspan for the expanded carrier row (+ highlight + send columns)
   /* per-variant "open in SNPVersity with these carriers preselected" */
   function sendBtn(v, cr){
     const n = cr ? ((Number(cr.hom)||0) + (Number(cr.het)||0)) : 0;
@@ -1451,6 +1766,9 @@
         <div class="ck"><div class="kk">Local confidence</div><div class="vv">${c.plddt==null?'<span class="muted">outside model</span>':`<span class="plddt-chip" style="background:${plddtHex(c.plddt)};color:${c.plddt>=70?'#06294f':'#5c3a06'}">${c.plddt.toFixed(0)}</span> <span class="muted">${plddtBand(c.plddt)}</span>`}</div></div>
         <div class="ck"><div class="kk">Secondary structure</div><div class="vv"><span class="ss-chip ss-${c.ss}">${c.ssLabel}</span></div></div>
         <div class="ck"><div class="kk">AI scores</div><div class="vv mono">${aiScoreSummary(v)}</div></div>
+        <div class="ck"><div class="kk">InterProScan activity</div><div class="vv">${activityCell(v.resi)}</div></div>
+        <div class="ck"><div class="kk">Predicted disorder</div><div class="vv">${iupredCell(iupredAt(v.resi)?.disorder)}</div></div>
+        <div class="ck"><div class="kk">Flexibility (Anchor2)</div><div class="vv">${iupredCell(iupredAt(v.resi)?.anchor2)}</div></div>
       </div>
       <div class="ctx-actions">
         ${v.consClass==='missense' && v.resi ? `<button class="btn" onclick="FOLD.panEffect('${v.id}')">${ICONS.effect||ICONS.star} PanEffect</button>` : ''}
@@ -1503,9 +1821,10 @@
       }
     });
   }
-  function applyStyle(){
-    if (!FD.viewer) return;
-    const v=FD.viewer; v.setStyle({}, {});
+  function applyStyle(viewer){
+    const v = viewer || FD.viewer;
+    if (!v) return;
+    v.setStyle({}, {});
     if (FD.colorMode==='plddt'){
       v.setStyle({}, { cartoon:{ colorfunc:(a)=>plddtHex(a.b) } });
     } else if (FD.colorMode==='domain'){
@@ -1516,15 +1835,19 @@
     } else {
       v.setStyle({}, { cartoon:{ color:'#d8dde6' } });
     }
-    if (FD.showVar){
-      FD.variants.forEach(vr=>{
-        const resi = plausibleResidue(vr.resi);
-        if (resi==null || !FD.struct || resi>FD.struct.length) return;
-        const col = FD.colorMode==='impact' ? impactHex(vr.combined) : (CONS_FILL[vr.consClass]||'#2f5bbf');
-        v.addStyle({ resi }, { stick:{ radius:.18 } });
-        v.addStyle({ resi }, { sphere:{ scale: vr.id===FD.selId ? 0.7 : 0.45, color: col } });
-      });
-    }
+    /* Variant residues shown in the 3D view are: every variant when the
+       "Variant residues" checkbox is on, PLUS whatever's individually
+       highlighted or currently selected — so a highlighted/selected
+       residue never disappears just because the blanket toggle is off. */
+    FD.variants.forEach(vr=>{
+      const shouldShow = FD.showVar || FD.highlight.has(vr.id) || vr.id===FD.selId;
+      if (!shouldShow) return;
+      const resi = plausibleResidue(vr.resi);
+      if (resi==null || !FD.struct || resi>FD.struct.length) return;
+      const col = FD.colorMode==='impact' ? impactHex(vr.combined) : (CONS_FILL[vr.consClass]||'#2f5bbf');
+      v.addStyle({ resi }, { stick:{ radius:.18 } });
+      v.addStyle({ resi }, { sphere:{ scale: vr.id===FD.selId ? 0.7 : 0.45, color: col } });
+    });
     v.render();
   }
   function focusResidue(animate){
@@ -1554,6 +1877,15 @@
   window.FOLD = {
     select(id){ FD.selId = (FD.selId===id?null:id); refreshSelection(); if(FD.selId) focusResidue(true); else if(FD.viewer){FD.viewer.removeAllLabels();applyStyle();FD.viewer.zoomTo();FD.viewer.render();} },
     carriers(id){ FD.openCarrier = (FD.openCarrier===id?null:id); refreshTable(); },
+
+    /* Open a Pfam domain's InterPro entry in a new tab, e.g.
+       https://www.ebi.ac.uk/interpro/entry/pfam/PF10275/ . Called from the
+       protein-browser track when a domain with a resolvable Pfam accession
+       is clicked (or activated via Enter, for keyboard users). */
+    openDomain(pfam){
+      if (!pfam) return;
+      window.open(interproHref(String(pfam).toUpperCase()), '_blank', 'noopener');
+    },
 
     /* Hand this gene's region + the accessions carrying an alternative allele over to
        SNPVersity.  id 'all' = every coding variant with carriers in the table.
@@ -1624,6 +1956,142 @@
     color(m){ FD.colorMode=m; document.querySelectorAll('.fold-toolbar .seg-b').forEach(b=>b.classList.remove('on'));
       const map={plddt:0,domain:1,impact:2}; const btns=document.querySelectorAll('.fold-toolbar .seg-b'); if(btns[map[m]])btns[map[m]].classList.add('on'); applyStyle(); },
     toggleVar(on){ FD.showVar=on; applyStyle(); },
+    /* Force-show/hide a single variant residue in the 3D view independent of
+       the blanket "Variant residues" toggle — lets a user highlight just the
+       residues they care about instead of all-or-nothing. */
+    toggleHighlight(id, on){ if(on) FD.highlight.add(id); else FD.highlight.delete(id); applyStyle(); },
+    /* Protein browser zoom: delta -1/+1 steps ×2, 0 resets to fit-to-container.
+       The track's viewBox stays a fixed 1000-unit coordinate system; zoom just
+       stretches the rendered SVG width (via trackSVG()'s inline style) inside
+       the already-scrollable .fold-track container, and raises ruler-tick
+       density so residue numbers stay legible down to single-residue zoom. */
+    zoomTrack(delta){
+      FD.trackZoom = delta===0 ? 1 : Math.max(1, Math.min(20, Math.round((FD.trackZoom||1) * (delta>0?2:0.5))));
+      const t=document.getElementById('foldTrack'); if(t) t.innerHTML=trackSVG();
+      const z=document.getElementById('foldZoomLabel'); if(z) z.textContent = `${Math.max(1,Math.min(20,FD.trackZoom||1)).toFixed(0)}×`;
+      if (typeof attachTT==='function') attachTT();
+    },
+    /* Export the Protein browser track (pLDDT / secondary structure / domains /
+       InterProScan sites / lollipops) as a PNG at the currently-selected zoom
+       level. The live SVG is styled via classes in main.css, which an <img>
+       rendering a standalone SVG can't see — so the export gets its own
+       inlined <style> with the same rules (literal colors, since CSS custom
+       properties aren't visible either) before rasterizing at 3x for crispness. */
+    downloadTrackImage(){
+      const host = document.getElementById('foldTrack');
+      const svgEl = host && host.querySelector('svg');
+      if (!svgEl){ alert('No protein browser track to export.'); return; }
+      const vb = svgEl.viewBox && svgEl.viewBox.baseVal;
+      const w = vb && vb.width ? vb.width : 1000, h = vb && vb.height ? vb.height : 176;
+      const NS = 'http://www.w3.org/2000/svg';
+
+      /* Build a standalone, static copy of the live track. The on-screen SVG is
+         styled by classes in main.css and sized with a percentage width for the
+         zoom stretch — neither survives in a standalone image — and it carries
+         interactive attributes (onclick / data-tt) whose text isn't XML-escaped.
+         Clone it, normalize sizing, drop the interactive attributes, paint a
+         white background, inline the label styles, then serialize with
+         XMLSerializer so the result is well-formed and carries an xmlns. */
+      const clone = svgEl.cloneNode(true);
+      clone.setAttribute('xmlns', NS);
+      clone.setAttribute('width', w);
+      clone.setAttribute('height', h);
+      clone.setAttribute('viewBox', `0 0 ${w} ${h}`);
+      clone.removeAttribute('style');   // percentage zoom width is meaningless standalone
+      clone.removeAttribute('class');
+      clone.querySelectorAll('[onclick],[onkeydown],[data-tt],[tabindex],[role]').forEach(el=>{
+        ['onclick','onkeydown','data-tt','tabindex','role'].forEach(a=>el.removeAttribute(a));
+      });
+      const bg = document.createElementNS(NS,'rect');
+      bg.setAttribute('x','0'); bg.setAttribute('y','0');
+      bg.setAttribute('width', w); bg.setAttribute('height', h); bg.setAttribute('fill','#ffffff');
+      clone.insertBefore(bg, clone.firstChild);
+      const styleEl = document.createElementNS(NS,'style');
+      styleEl.textContent = 'text{font-family:Inter,system-ui,-apple-system,sans-serif}'
+        + '.tlab{font-size:8.5px;fill:#8b97ab}'
+        + '.dlab{font-size:8.5px;fill:#2a3a52;font-weight:600}'
+        + '.rlab{font-size:8px;fill:#8b97ab}'
+        + '.vlab{font-size:9px;fill:#d6322a}';
+      clone.insertBefore(styleEl, clone.firstChild);
+
+      const svgMarkup = new XMLSerializer().serializeToString(clone);
+      const scale = 3;
+      const canvas = document.createElement('canvas');
+      canvas.width = w*scale; canvas.height = h*scale;
+      const ctx = canvas.getContext('2d');
+      const img = new Image();
+      img.onload = () => {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        const a = document.createElement('a');
+        a.href = canvas.toDataURL('image/png');
+        a.download = `${FD.gene||'protein'}_protein_browser.png`;
+        document.body.appendChild(a); a.click(); a.remove();
+      };
+      img.onerror = () => alert('Could not render the track image.');
+      img.src = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svgMarkup)));
+    },
+    /* Export the on-screen view as a full-HD (1920x1080), transparent-background
+       PNG — WITHOUT touching the live viewer (resizing it in place was the bug
+       last time: growing the visible canvas changed its aspect ratio but not
+       its zoom, so the molecule rendered tiny inside a huge frame — technically
+       higher-res but visually worse). Instead render a second, offscreen
+       3Dmol viewer at 1920x1080, copy the current camera view across with
+       getView()/setView() so framing matches exactly, capture, then discard it. */
+    downloadImage(){
+      if (!FD.viewer || !FD.pdb){ alert('Load a structure first.'); return; }
+      let off;
+      try {
+        off = document.createElement('div');
+        Object.assign(off.style, { position:'fixed', left:'-99999px', top:'0',
+          width:'1920px', height:'1080px' });
+        document.body.appendChild(off);
+        const viewer = $3Dmol.createViewer(off, { backgroundColor:'white' });
+        viewer.addModel(FD.pdb, 'pdb');
+        applyStyle(viewer);
+        viewer.setView(FD.viewer.getView());          // match the on-screen camera
+        viewer.setBackgroundColor(0x000000, 0);        // alpha 0 = transparent
+        viewer.render();
+        const uri = viewer.pngURI();
+        const a = document.createElement('a');
+        a.href = uri;
+        a.download = `${FD.gene||'structure'}.png`;
+        document.body.appendChild(a); a.click(); a.remove();
+      } catch(e){
+        console.error('downloadImage error', e);
+        alert('Could not export image from the 3D viewer.');
+      } finally {
+        if (off) off.remove();
+      }
+    },
+    /* Export the coding-variant table exactly as displayed (visible columns,
+       current sort order) as CSV or TSV. */
+    downloadTable(format){
+      const rows = sortedVariants();
+      if (!rows.length){ alert('No variant table to export.'); return; }
+      const delim = format === 'tsv' ? '\t' : ',';
+      const cols = foldVisibleCols();
+      const header = [...cols.map(c => c.label), 'Carriers (hom)', 'Carriers (het)'];
+      const lines = [header.map(h => csvEscape(h, delim)).join(delim)];
+      rows.forEach(v => {
+        const cr = carrierOf(v);
+        const cells = cols.map(c => {
+          const val = c.get(v);
+          return csvEscape(val == null ? '' : (typeof val === 'number' ? val : String(val)), delim);
+        });
+        cells.push(csvEscape(cr ? (cr.hom||0) : '', delim));
+        cells.push(csvEscape(cr ? (cr.het||0) : '', delim));
+        lines.push(cells.join(delim));
+      });
+      const blob = new Blob([lines.join('\n')], { type: format === 'tsv' ? 'text/tab-separated-values' : 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${FD.gene||'variants'}_coding_variants.${format === 'tsv' ? 'tsv' : 'csv'}`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    },
     reset(){ if(FD.viewer){ FD.viewer.zoomTo(); FD.viewer.render(); } },
     focus(){ focusResidue(true); },
     loadGene(){ const el=document.getElementById('foldGeneInput'); if(!el)return;
