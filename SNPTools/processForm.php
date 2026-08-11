@@ -2,22 +2,30 @@
 /* =====================================================================
  *  processForm.php — region + accession list  ->  VCF (via h5_to_vcf.py)
  *
- *  Local testing (MAMP) vs production (Linux): the ONLY thing you should
- *  need to change between machines is $PYTHON_PATH below (or set the
- *  PYTHON_PATH environment variable). Everything else is relative.
+ *  Local testing (MAMP) vs production (Linux/Docker): nothing in this file
+ *  changes between machines. The Python interpreter is resolved from the
+ *  PYTHON_PATH environment variable, falling back to 'python3' on PATH.
+ *  Python deps are declared in requirements.txt (pip-installed at image build).
  * ===================================================================== */
 
 header('Content-Type: application/json');
 
 /* ---------------------------------------------------------------------
- *  CONFIG — edit for your machine
+ *  CONFIG — provided by the environment; no machine paths committed to git
  * ------------------------------------------------------------------- */
-// 1) Python interpreter that has h5py + numpy installed.
-//    MAMP example (miniconda):  /Users/<you>/opt/miniconda3/bin/python
-//    Prefer setting the PYTHON_PATH env var; this is the fallback.
+// 1) Python interpreter that has h5py + numpy installed. Resolution order:
+//      a. PYTHON_PATH environment variable (first hit wins). Set it per host,
+//         not in code, so nothing here is machine-specific:
+//           - Docker:  ENV PYTHON_PATH=python3   (or just rely on the fallback)
+//           - MAMP:    SetEnv PYTHON_PATH /path/to/venv/bin/python  in an Apache
+//                      conf / .htaccess, or export it in the shell that starts MAMP
+//                      — keeps your local absolute path out of the repo.
+//      b. 'python3' on the system PATH (the default). In the Docker image the
+//         deps from requirements.txt are pip-installed globally, so python3 works
+//         out of the box with no configuration.
 $PYTHON_PATH = getenv('PYTHON_PATH');
 if (!$PYTHON_PATH) {
-    $PYTHON_PATH = '/usr/bin/python3';           // <-- CHANGE ME for MAMP if needed
+    $PYTHON_PATH = 'python3';                     // resolved via PATH — portable across OSes
 }
 
 // 2) Where the .h5 files live, relative to this PHP file.

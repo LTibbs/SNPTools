@@ -22,7 +22,9 @@
 .mg-brand img{height:55px;width:auto;display:block}
 .mg-brand:focus-visible{outline:2px solid var(--mg-blue);outline-offset:3px;border-radius:4px}
 .mg-divider{width:1px;height:45px;background:var(--line,#e6e9ef)}
-.mg-kicker{height:35px;font-size:30px;color:var(--ink,#141922);font-weight:600;letter-spacing:.01em}
+.mg-titles{display:flex;flex-direction:column;justify-content:center;gap:3px}
+.mg-kicker{font-size:30px;line-height:1;color:var(--ink,#141922);font-weight:600;letter-spacing:.01em}
+.mg-sub{font-size:13px;line-height:1.25;color:var(--muted,#62718a);font-weight:500;letter-spacing:.005em}
 .mg-kicker b{color:var(--mg-blue);font-weight:700}
 .mg-mast .mg-spacer{flex:1}
 .mg-nav{display:flex;align-items:center;gap:6px}
@@ -38,7 +40,7 @@
 @media (max-width:640px){
   .mg-mast{padding:12px 16px;gap:12px}
   .mg-brand img{height:38px}
-  .mg-divider,.mg-kicker{display:none}
+  .mg-divider,.mg-titles{display:none}
   .mg-help{padding:11px 14px}
   .mg-help .mg-lbl{display:none}
 }
@@ -58,7 +60,7 @@
       </div>
     </div>
     <nav id="nav"></nav>
-    <div class="foot">Developed by MaizeGDB <br> Funed by USDA-ARS</div>
+    <div class="foot">Developed by MaizeGDB <br> Funded by USDA-ARS</div>
   </aside>
   <div class="scrim" id="scrim" onclick="toggleRail(false)"></div>
 
@@ -71,7 +73,10 @@
         <img src="./images/maizegdb_logo.png" alt="MaizeGDB — Maize Genetics and Genomics Database">
       </a>
       <div class="mg-divider"></div>
-      <div class="mg-kicker">SNP<b>Tools</b></div>
+      <div class="mg-titles">
+        <div class="mg-kicker">SNP<b>Tools</b></div>
+        <div class="mg-sub">Explore variant diversity across maize genomes</div>
+      </div>
       <div class="mg-spacer"></div>
       <nav class="mg-nav">
         <a class="mg-help" href="#help" onclick="openHelp();return false;" aria-label="Help and FAQ">
@@ -118,7 +123,7 @@
 <script src="./js/snphandoff.js"></script>
 <script src="./js/accessions.catalog.js"></script>
 <script src="./js/data.js"></script>
-<script src="./data/structures/structure-Zm00001eb378140.js"></script>
+<script src="./data/structures/alphafold/structure-Zm00001eb378140.js"></script>
 <script src="./js/snpversity.js"></script>
 <script src="./js/snpimpact.js"></script>
 <script src="./js/snpfold.js"></script>
