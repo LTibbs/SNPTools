@@ -1,53 +1,231 @@
 /* =====================================================================
  *  snpgwas.js — GWAS Explorer (Manhattan plot) as a native SNPTools panel.
- *  Registers 'snpgwas'. Loads AFTER core.js (needs SNPTools, S, go()).
+ *  Registers 'snpgwas'. Loads AFTER core.js + data.js (needs SNPTools, S,
+ *  go(), and Data.chromLengths() for shared genome geometry).
  *
- *  Ported from a standalone prototype (see GWAS_EXPLORER_HANDOFF.md) —
- *  the canvas rendering, zoom/pan math, binary-search region lookup and
- *  minimap are unchanged. What changed to fit the suite:
- *    - data is fetched from ./data/gwas/*.csv instead of embedded inline
- *    - CSV export uses a Blob + temporary <a download> instead of the
- *      Claude Artifacts sandbox's window.claude.downloads API
- *    - a "Send region to SNPVersity" button hands the selected interval
- *      off through the same window.versityRequest(...) entry point
- *      SNPFunction and friends use (see snpversity.js applyPendingRequest)
+ *  Multi-dataset model: data/gwas/manifest.json lists every available
+ *  trait × population × publication combination (id, trait, population,
+ *  publication, file, threshP, ...). The picker at the top of the page
+ *  is a faceted filter over that list — narrowing one dropdown narrows
+ *  what the others can offer, so a user can never land on a combination
+ *  that doesn't exist. Each combination's SNPs live in their own CSV
+ *  (same format as before), fetched lazily and cached per-dataset once
+ *  visited. All datasets share one genome layout (chromosome count and
+ *  lengths come from Data.chromLengths(), the same table SNPVersity
+ *  uses), so only the per-SNP arrays and the significance threshold
+ *  change when you switch datasets — the axis geometry does not.
+ *
+ *  Everything below the picker (canvas rendering, zoom/pan math,
+ *  binary-search region lookup, minimap, region panel, CSV export via
+ *  Blob + <a download>, "Send to SNPVersity" handoff (region and/or NAM
+ *  accessions, independently checkbox-gated) through
+ *  window.versityRequest(...)) is unchanged from the single-dataset
+ *  version — it just reads the currently active dataset instead of a
+ *  hardcoded one.
  * ===================================================================== */
 (function () {
   'use strict';
 
   const CFG = {
-    csvUrl:     './data/gwas/GCTA_LW_intercept_fixed.csv',
-    threshP:    6.234414e-05,
-    threshLabel:'6.234414e-05',
-    traitLabel: 'LW — intercept (fixed effect)',
-    chrCount:   10,
+    manifestUrl: './data/gwas/manifest.json',
+    dataBase:    './data/gwas/',
+    chrCount:    10,
   };
-  const THRESH_NEGLOG = -Math.log10(CFG.threshP);
+  const FACETS = ['trait', 'population', 'publication'];
+  const FILTERED_SNPS_NOTE = 'NOTE: SNPs with raw p values above 0.001 (−log₁₀ P < 3) are not shown, to save memory.';
 
   /* ------------------------------------------------------------------ *
-   *  DATA LOAD + PARSE  (fetched once, cached for the session)          *
+   *  SHARED GENOME GEOMETRY — computed once from the same chromosome    *
+   *  length table SNPVersity uses, so every dataset's axis lines up.    *
    * ------------------------------------------------------------------ */
-  let DATA = null;
-  let loadPromise = null;
-  let loadError = null;
+  let GEOM = null; // {chrLen, chrOffset, TOTAL_CUM}
 
-  function loadData() {
-    if (DATA) return Promise.resolve(DATA);
-    if (loadPromise) return loadPromise;
-    loadPromise = fetch(CFG.csvUrl).then(function (r) {
-      if (!r.ok) throw new Error('HTTP ' + r.status + ' fetching ' + CFG.csvUrl);
-      return r.text();
-    }).then(function (raw) {
-      DATA = parseCsv(raw);
-      view = { x0: 0, x1: DATA.TOTAL_CUM };
-      return DATA;
+  function ensureGeometry() {
+    if (GEOM) return GEOM;
+    if (typeof Data === 'undefined' || typeof Data.chromLengths !== 'function') {
+      throw new Error('Data.chromLengths() is unavailable — cannot size the genome axis.');
+    }
+    const ref = Data.chromLengths();
+    const CHR_COUNT = CFG.chrCount;
+    const chrLen = new Float64Array(CHR_COUNT + 1);
+    for (let c = 1; c <= CHR_COUNT; c++) chrLen[c] = ref['chr' + c] || 0;
+    let totalLen = 0;
+    for (let c = 1; c <= CHR_COUNT; c++) totalLen += chrLen[c];
+    const GAP = (totalLen / CHR_COUNT) * 0.03;
+    const chrOffset = new Float64Array(CHR_COUNT + 1);
+    let cum = 0;
+    for (let c = 1; c <= CHR_COUNT; c++) { chrOffset[c] = cum; cum += chrLen[c] + GAP; }
+    GEOM = { chrLen: chrLen, chrOffset: chrOffset, TOTAL_CUM: cum - GAP };
+    return GEOM;
+  }
+
+  /* ------------------------------------------------------------------ *
+   *  MANIFEST — the catalog of available trait × population ×          *
+   *  publication combinations.                                          *
+   * ------------------------------------------------------------------ */
+  let MANIFEST = null;
+  let manifestPromise = null;
+  let manifestError = null;
+
+  function loadManifest() {
+    if (MANIFEST) return Promise.resolve(MANIFEST);
+    if (manifestPromise) return manifestPromise;
+    manifestPromise = fetch(CFG.manifestUrl, { cache: 'no-store' }).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status + ' fetching ' + CFG.manifestUrl);
+      return r.json();
+    }).then(function (list) {
+      if (!Array.isArray(list) || !list.length) throw new Error('No datasets listed in ' + CFG.manifestUrl);
+      MANIFEST = list;
+      resolveSelection();
+      if (activeEntry) loadDataset(activeEntry);
+      return MANIFEST;
     }).catch(function (err) {
-      loadError = err;
-      loadPromise = null;
+      manifestError = err;
+      manifestPromise = null;
       throw err;
     });
-    return loadPromise;
+    return manifestPromise;
   }
+
+  /* ------------------------------------------------------------------ *
+   *  FACETED SELECTION — selection[facet] narrows candidateEntries();   *
+   *  optionsFor(facet) computes what's still reachable in that facet    *
+   *  given the OTHER set facets, so every offered option leads to at    *
+   *  least one real dataset (no dead-end combinations).                 *
+   * ------------------------------------------------------------------ */
+  let selection = { trait: null, measure: null, population: null, publication: null };
+  let activeEntry = null;   // resolved manifest entry currently shown (or being loaded)
+
+  function entryMatches(e, sel, excludeFacet) {
+    return FACETS.every(function (f) {
+      if (f === excludeFacet) return true;
+      return sel[f] == null || e[f] === sel[f];
+    });
+  }
+  function candidateEntries() {
+    return MANIFEST.filter(function (e) { return entryMatches(e, selection, null); });
+  }
+  function optionsFor(facet) {
+    const seen = new Map();
+    MANIFEST.forEach(function (e) {
+      if (entryMatches(e, selection, facet)) seen.set(e[facet], (seen.get(e[facet]) || 0) + 1);
+    });
+    return Array.from(seen.keys()).sort(function (a, b) { return a.localeCompare(b); })
+      .map(function (v) { return { value: v, count: seen.get(v) }; });
+  }
+
+  /* Narrow to a unique dataset automatically; otherwise only drop the
+     active dataset if it no longer matches the (broadened/changed)
+     selection — broadening a filter shouldn't yank away a plot that's
+     still a valid match, it should just surface the other options too. */
+  function resolveSelection() {
+    const cands = candidateEntries();
+    if (cands.length === 1) { setActiveEntry(cands[0]); return; }
+    if (activeEntry && !cands.some(function (e) { return e.id === activeEntry.id; })) {
+      activeEntry = null; DATA = null; datasetError = null; currentRegion = null;
+    }
+  }
+
+  function setActiveEntry(entry) {
+    if (activeEntry && activeEntry.id === entry.id && (DATA || datasetPromiseId === entry.id)) return;
+    activeEntry = entry;
+    DATA = null; datasetError = null; currentRegion = null;
+    selection = { trait: entry.trait, measure: entry.measure, population: entry.population, publication: entry.publication };
+    loadDataset(entry);
+  }
+
+  function onFacetChange(facet, value) {
+    selection[facet] = value || null;
+    resolveSelection();
+    render(document.getElementById('page'));
+  }
+
+  /* ------------------------------------------------------------------ *
+   *  DATASET LOAD + PARSE — fetched lazily, cached per manifest entry   *
+   *  id so revisiting a dataset in the same session is instant.         *
+   * ------------------------------------------------------------------ */
+  let DATA = null;
+  let datasetCache = new Map();   // entry.id -> parsed DATA
+  let datasetPromiseId = null;    // entry.id currently in flight (guards a stale fetch from clobbering a newer pick)
+  let datasetError = null;
+
+  /* ------------------------------------------------------------------ *
+   *  SIGNIFICANCE THRESHOLD — either the publication's own value        *
+   *  (threshP in the manifest, as-is — this is the default) or a        *
+   *  live user-provided one, computed as alpha / (SimpleM's effective   *
+   *  marker count, or Bonferroni's raw marker count). Recomputed        *
+   *  whenever the dataset, source, method, or alpha changes; drives     *
+   *  point coloring, counts, and the plot's threshold line(s) — the     *
+   *  published line always stays visible for comparison once the user  *
+   *  switches to a custom value.                                       *
+   * ------------------------------------------------------------------ */
+  let threshSource = 'published'; // 'published' | 'custom'
+  let threshMethod = 'simplem';   // 'simplem' | 'bonferroni' (only matters when threshSource==='custom')
+  let threshAlpha = 0.05;
+  let ACTIVE_THRESH_P = 0;
+  let ACTIVE_THRESH_NEGLOG = 0;
+  let ACTIVE_TOTAL_SIG = 0;
+
+  function recomputeThreshold() {
+    if (!DATA || !activeEntry) return;
+    let p;
+    if (threshSource === 'published') {
+      p = activeEntry.threshP;
+    } else {
+      const denom = threshMethod === 'bonferroni' ? activeEntry.totalMarkers : activeEntry.effectiveMarkers;
+      p = denom ? (threshAlpha / denom) : activeEntry.threshP;
+    }
+    ACTIVE_THRESH_P = p;
+    ACTIVE_THRESH_NEGLOG = p > 0 ? -Math.log10(p) : 99;
+    let n = 0;
+    for (let i = 0; i < DATA.n; i++) if (DATA.negLogP[i] >= ACTIVE_THRESH_NEGLOG) n++;
+    ACTIVE_TOTAL_SIG = n;
+    if (currentRegion) {
+      const sig = [];
+      currentRegion.indices.forEach(function (idx) { if (DATA.negLogP[idx] >= ACTIVE_THRESH_NEGLOG) sig.push(idx); });
+      currentRegion.sigIndices = sig;
+    }
+  }
+
+  function publishedThreshNegLog() { return -Math.log10(activeEntry.threshP); }
+  function publishedTotalSig() {
+    const nl = publishedThreshNegLog();
+    let n = 0;
+    for (let i = 0; i < DATA.n; i++) if (DATA.negLogP[i] >= nl) n++;
+    return n;
+  }
+
+  function loadDataset(entry) {
+    if (datasetCache.has(entry.id)) {
+      DATA = datasetCache.get(entry.id);
+      view = { x0: 0, x1: ensureGeometry().TOTAL_CUM };
+      threshSource = 'published'; threshMethod = 'simplem'; threshAlpha = 0.05;
+      recomputeThreshold();
+      rerenderIfActive();
+      return;
+    }
+    datasetPromiseId = entry.id;
+    fetch(CFG.dataBase + entry.file).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status + ' fetching ' + entry.file);
+      return r.text();
+    }).then(function (raw) {
+      ensureGeometry();
+      const parsed = parseCsv(raw);
+      datasetCache.set(entry.id, parsed);
+      if (activeEntry && activeEntry.id === entry.id) {
+        DATA = parsed;
+        view = { x0: 0, x1: GEOM.TOTAL_CUM };
+        threshSource = 'published'; threshMethod = 'simplem'; threshAlpha = 0.05;
+        recomputeThreshold();
+      }
+      rerenderIfActive();
+    }).catch(function (err) {
+      if (activeEntry && activeEntry.id === entry.id) datasetError = err;
+      rerenderIfActive();
+    });
+  }
+
+  function rerenderIfActive() { if (S.tool === 'snpgwas') render(document.getElementById('page')); }
 
   function parseCsv(raw) {
     const lines = raw.replace(/\r/g, '').trim().split('\n');
@@ -71,34 +249,19 @@
     const CHR_COUNT = CFG.chrCount;
     const chrStart = new Int32Array(CHR_COUNT + 1).fill(-1);
     const chrEnd = new Int32Array(CHR_COUNT + 1).fill(-1);
-    const chrLen = new Float64Array(CHR_COUNT + 1);
     for (let i = 0; i < n; i++) {
       const c = chrOf[i];
       if (chrStart[c] === -1) chrStart[c] = i;
       chrEnd[c] = i + 1;
-      if (bpOf[i] > chrLen[c]) chrLen[c] = bpOf[i];
     }
-
-    let totalLen = 0;
-    for (let c = 1; c <= CHR_COUNT; c++) totalLen += chrLen[c];
-    const GAP = (totalLen / CHR_COUNT) * 0.03;
-
-    const chrOffset = new Float64Array(CHR_COUNT + 1);
-    let cum = 0;
-    for (let c = 1; c <= CHR_COUNT; c++) { chrOffset[c] = cum; cum += chrLen[c] + GAP; }
-    const TOTAL_CUM = cum - GAP;
 
     let globalMaxNegLog = 0;
     for (let i = 0; i < n; i++) if (negLogP[i] > globalMaxNegLog) globalMaxNegLog = negLogP[i];
     const Y_MAX = globalMaxNegLog * 1.10;
 
-    let totalSig = 0;
-    for (let i = 0; i < n; i++) if (negLogP[i] >= THRESH_NEGLOG) totalSig++;
-
     return {
       n: n, chrOf: chrOf, bpOf: bpOf, negLogP: negLogP, fields: fields,
-      chrStart: chrStart, chrEnd: chrEnd, chrLen: chrLen, chrOffset: chrOffset,
-      TOTAL_CUM: TOTAL_CUM, Y_MAX: Y_MAX, totalSig: totalSig,
+      chrStart: chrStart, chrEnd: chrEnd, Y_MAX: Y_MAX,
     };
   }
 
@@ -111,7 +274,7 @@
     while (lo < hi) { const mid = (lo + hi) >>> 1; if (bpOf[mid] <= target) lo = mid + 1; else hi = mid; }
     return lo;
   }
-  function cumAt(idx) { return DATA.chrOffset[DATA.chrOf[idx]] + DATA.bpOf[idx]; }
+  function cumAt(idx) { return GEOM.chrOffset[DATA.chrOf[idx]] + DATA.bpOf[idx]; }
   function globalLowerBound(target) {
     let lo = 0, hi = DATA.n;
     while (lo < hi) { const mid = (lo + hi) >>> 1; if (cumAt(mid) < target) lo = mid + 1; else hi = mid; }
@@ -124,9 +287,9 @@
   }
   function chrForCum(x) {
     for (let c = 1; c <= CFG.chrCount; c++) {
-      if (x >= DATA.chrOffset[c] && x <= DATA.chrOffset[c] + DATA.chrLen[c]) return c;
+      if (x >= GEOM.chrOffset[c] && x <= GEOM.chrOffset[c] + GEOM.chrLen[c]) return c;
     }
-    for (let c = 1; c <= CFG.chrCount; c++) if (x < DATA.chrOffset[c]) return c > 1 ? c - 1 : c;
+    for (let c = 1; c <= CFG.chrCount; c++) if (x < GEOM.chrOffset[c]) return c > 1 ? c - 1 : c;
     return CFG.chrCount;
   }
 
@@ -137,6 +300,7 @@
     return String(s == null ? '' : s)
       .replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
+  function cap1(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
   /* ------------------------------------------------------------------ *
    *  VIEW / INTERACTION STATE — module scope, persists across visits   *
@@ -146,7 +310,7 @@
    * ------------------------------------------------------------------ */
   let view = null;           // {x0,x1} in cumulative-bp space
   let mode = 'pan';          // 'pan' | 'select'
-  const MARGIN = { top: 16, right: 20, bottom: 34, left: 54 };
+  const MARGIN = { top: 50, right: 20, bottom: 34, left: 54 };
   const MIN_SPAN = 300;
 
   let DOM = {};
@@ -159,12 +323,50 @@
   let regionFilter = 'all';
   const TABLE_CAP = 1500;
 
+  /* table sort — sortCol null means natural (genomic position) order.
+     currentTableList is the exact filtered+sorted index list currently on
+     screen, kept in sync by renderRegionPanel() so "export shown SNPs"
+     always matches what's actually shown. */
+  let sortCol = null;
+  let sortDir = 'asc';
+  let currentTableList = [];
+
+  const SORT_COLS = [
+    { key: 'snp',     label: 'SNP',      get: function (idx) { return DATA.fields[idx][1]; },                              type: 'str' },
+    { key: 'chr',     label: 'Chr',      get: function (idx) { return DATA.chrOf[idx]; },                                  type: 'num' },
+    { key: 'bp',      label: 'BP',       get: function (idx) { return DATA.bpOf[idx]; },                                   type: 'num' },
+    { key: 'a1a2',    label: 'A1/A2',    get: function (idx) { return DATA.fields[idx][3] + '/' + DATA.fields[idx][4]; },  type: 'str' },
+    { key: 'freq',    label: 'Freq',     get: function (idx) { return parseFloat(DATA.fields[idx][5]); },                  type: 'num' },
+    { key: 'beta',    label: 'Beta',     get: function (idx) { return parseFloat(DATA.fields[idx][6]); },                  type: 'num' },
+    { key: 'se',      label: 'SE',       get: function (idx) { return parseFloat(DATA.fields[idx][7]); },                  type: 'num' },
+    { key: 'p',       label: 'P',        get: function (idx) { return parseFloat(DATA.fields[idx][8]); },                  type: 'num' },
+    { key: 'neglogp', label: '−log₁₀P',  get: function (idx) { return DATA.negLogP[idx]; },                                type: 'num' },
+  ];
+
+  function sortedIndices(list, key, dir) {
+    const col = SORT_COLS.filter(function (c) { return c.key === key; })[0];
+    if (!col) return list;
+    const mul = dir === 'desc' ? -1 : 1;
+    return list.slice().sort(function (a, b) {
+      const va = col.get(a), vb = col.get(b);
+      return col.type === 'num' ? (va - vb) * mul : String(va).localeCompare(String(vb)) * mul;
+    });
+  }
+
+  function tableHeadHTML() {
+    return '<tr>' + SORT_COLS.map(function (c) {
+      const active = sortCol === c.key;
+      const arrow = active ? (sortDir === 'asc' ? ' ▲' : ' ▼') : '';
+      return '<th class="gwx-sortable' + (active ? ' sorted' : '') + '" data-sort="' + c.key + '">' + c.label + arrow + '</th>';
+    }).join('') + '</tr>';
+  }
+
   function clampView(x0, x1) {
     let span = x1 - x0;
     if (span < MIN_SPAN) span = MIN_SPAN;
-    if (span > DATA.TOTAL_CUM) span = DATA.TOTAL_CUM;
+    if (span > GEOM.TOTAL_CUM) span = GEOM.TOTAL_CUM;
     if (x0 < 0) { x0 = 0; x1 = span; }
-    if (x1 > DATA.TOTAL_CUM) { x1 = DATA.TOTAL_CUM; x0 = DATA.TOTAL_CUM - span; }
+    if (x1 > GEOM.TOTAL_CUM) { x1 = GEOM.TOTAL_CUM; x0 = GEOM.TOTAL_CUM - span; }
     return { x0: x0, x1: x1 };
   }
   function setView(x0, x1) {
@@ -178,13 +380,13 @@
     if (!DOM.readout) return;
     const span = view.x1 - view.x0;
     let label;
-    if (view.x0 <= 0 && view.x1 >= DATA.TOTAL_CUM) {
-      label = 'Whole genome (' + fmtMb(DATA.TOTAL_CUM) + ')';
+    if (view.x0 <= 0 && view.x1 >= GEOM.TOTAL_CUM) {
+      label = 'Whole genome (' + fmtMb(GEOM.TOTAL_CUM) + ')';
     } else {
       const startChr = chrForCum(view.x0), endChr = chrForCum(view.x1);
       if (startChr === endChr) {
-        const bpStart = Math.max(0, view.x0 - DATA.chrOffset[startChr]);
-        const bpEnd = Math.min(DATA.chrLen[startChr], view.x1 - DATA.chrOffset[startChr]);
+        const bpStart = Math.max(0, view.x0 - GEOM.chrOffset[startChr]);
+        const bpEnd = Math.min(GEOM.chrLen[startChr], view.x1 - GEOM.chrOffset[startChr]);
         label = 'Chr ' + startChr + ': ' + fmtBp(bpStart) + '–' + fmtBp(bpEnd) + ' (' + fmtMb(span) + ')';
       } else {
         label = 'Chr ' + startChr + '–' + endChr + ' (' + fmtMb(span) + ')';
@@ -234,7 +436,7 @@
     return {
       chrA: v('--navy-700', '#1c3360'), chrB: '#5b8bff',
       sig: '#c0392b', grid: v('--line-2', '#eef2f8'), axis: '#c9d3e4',
-      panelBg: v('--white', '#fff'), muted: v('--muted', '#62718a'),
+      panelBg: v('--white', '#fff'), muted: v('--muted', '#62718a'), ink: v('--ink', '#151b2c'),
       selectFill: 'rgba(207,138,18,.20)', selectBorder: v('--gold', '#cf8a12'),
       viewportFill: 'rgba(37,99,235,.16)', viewportBorder: v('--blue', '#2563eb'),
     };
@@ -254,6 +456,12 @@
     const plotLeft = MARGIN.left, plotRight = plotW - MARGIN.right;
     const plotTop = MARGIN.top, plotBottom = plotH - MARGIN.bottom;
     const plotAreaH = plotBottom - plotTop;
+
+    ctx.fillStyle = col.ink || col.muted;
+    ctx.font = '600 20px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText(activeEntry.trait + ' - ' + measureShort(activeEntry.measure), (plotLeft + plotRight) / 2, 8);
 
     const yStep = niceStep(DATA.Y_MAX / 6);
     ctx.strokeStyle = col.grid;
@@ -280,7 +488,7 @@
     ctx.textBaseline = 'top';
     const visibleChrs = [];
     for (let c = 1; c <= CFG.chrCount; c++) {
-      const segX0 = DATA.chrOffset[c], segX1 = DATA.chrOffset[c] + DATA.chrLen[c];
+      const segX0 = GEOM.chrOffset[c], segX1 = GEOM.chrOffset[c] + GEOM.chrLen[c];
       if (segX1 < view.x0 || segX0 > view.x1) continue;
       visibleChrs.push(c);
       const px0 = Math.max(plotLeft, xToPx(segX0)), px1 = Math.min(plotRight, xToPx(segX1));
@@ -299,13 +507,13 @@
     }
     if (visibleChrs.length === 1) {
       const c = visibleChrs[0];
-      const bpSpan = Math.min(DATA.chrLen[c], view.x1 - DATA.chrOffset[c]) - Math.max(0, view.x0 - DATA.chrOffset[c]);
+      const bpSpan = Math.min(GEOM.chrLen[c], view.x1 - GEOM.chrOffset[c]) - Math.max(0, view.x0 - GEOM.chrOffset[c]);
       const step = niceStep(bpSpan / 6);
-      const startTick = Math.ceil(Math.max(0, view.x0 - DATA.chrOffset[c]) / step) * step;
+      const startTick = Math.ceil(Math.max(0, view.x0 - GEOM.chrOffset[c]) / step) * step;
       ctx.font = '10.5px ui-monospace, Menlo, monospace';
       ctx.fillStyle = col.muted;
-      for (let bp = startTick; bp <= Math.min(DATA.chrLen[c], view.x1 - DATA.chrOffset[c]); bp += step) {
-        const px = xToPx(DATA.chrOffset[c] + bp);
+      for (let bp = startTick; bp <= Math.min(GEOM.chrLen[c], view.x1 - GEOM.chrOffset[c]); bp += step) {
+        const px = xToPx(GEOM.chrOffset[c] + bp);
         if (px < plotLeft || px > plotRight) continue;
         ctx.strokeStyle = col.grid;
         ctx.beginPath(); ctx.moveTo(px, plotTop); ctx.lineTo(px, plotBottom); ctx.stroke();
@@ -314,39 +522,51 @@
       }
     }
 
-    const thY = yToPx(THRESH_NEGLOG);
-    if (thY >= plotTop && thY <= plotBottom) {
+    /* active threshold line always shows; the published one only draws
+       separately when it differs from the active value — at the default
+       (source==='published') they're the same line, so only one is drawn. */
+    function drawThreshLine(negLog, label, color, dash) {
+      const y = yToPx(negLog);
+      if (y < plotTop || y > plotBottom) return;
       ctx.save();
-      ctx.strokeStyle = col.muted;
-      ctx.setLineDash([5, 4]);
+      ctx.strokeStyle = color;
+      ctx.setLineDash(dash);
       ctx.lineWidth = 1.25;
-      ctx.beginPath(); ctx.moveTo(plotLeft, thY); ctx.lineTo(plotRight, thY); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(plotLeft, y); ctx.lineTo(plotRight, y); ctx.stroke();
       ctx.restore();
-      ctx.fillStyle = col.muted;
+      ctx.fillStyle = color;
       ctx.font = '10.5px system-ui, sans-serif';
       ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
-      ctx.fillText('SimpleM threshold (p < ' + CFG.threshLabel + ')', plotLeft + 6, thY - 3);
+      ctx.fillText(label, plotLeft + 6, y - 3);
+    }
+    const pubNegLog = publishedThreshNegLog();
+    const activeLabel = threshSource === 'published'
+      ? ((activeEntry.thresholdMethod || 'Published') + ' threshold (−log₁₀P > ' + ACTIVE_THRESH_NEGLOG.toFixed(2) + ', α=' + activeEntry.thresholdAlpha + ')')
+      : ((threshMethod === 'bonferroni' ? 'Bonferroni' : 'SimpleM') + ' threshold (−log₁₀P > ' + ACTIVE_THRESH_NEGLOG.toFixed(2) + ', α=' + threshAlpha + ')');
+    drawThreshLine(ACTIVE_THRESH_NEGLOG, activeLabel, col.muted, [5, 4]);
+    if (Math.abs(ACTIVE_THRESH_NEGLOG - pubNegLog) > 1e-6) {
+      drawThreshLine(pubNegLog, (activeEntry.thresholdMethod || 'Published') + ' threshold (−log₁₀P > ' + pubNegLog.toFixed(2) + ', α=' + activeEntry.thresholdAlpha + ')', col.selectBorder, [2, 3]);
     }
 
     let pointR = 1.6;
-    const spanFrac = (view.x1 - view.x0) / DATA.TOTAL_CUM;
+    const spanFrac = (view.x1 - view.x0) / GEOM.TOTAL_CUM;
     if (spanFrac < 0.25) pointR = 2.3;
     if (spanFrac < 0.05) pointR = 3.0;
     if (spanFrac < 0.01) pointR = 3.8;
 
     for (let c = 1; c <= CFG.chrCount; c++) {
-      const segX0 = DATA.chrOffset[c], segX1 = DATA.chrOffset[c] + DATA.chrLen[c];
+      const segX0 = GEOM.chrOffset[c], segX1 = GEOM.chrOffset[c] + GEOM.chrLen[c];
       if (segX1 < view.x0 || segX0 > view.x1) continue;
-      const bpLo = Math.max(0, view.x0 - DATA.chrOffset[c]);
-      const bpHi = Math.min(DATA.chrLen[c], view.x1 - DATA.chrOffset[c]);
+      const bpLo = Math.max(0, view.x0 - GEOM.chrOffset[c]);
+      const bpHi = Math.min(GEOM.chrLen[c], view.x1 - GEOM.chrOffset[c]);
       const s = DATA.chrStart[c], e = DATA.chrEnd[c];
       if (s === -1) continue;
       const lo = lowerBound(s, e, DATA.bpOf, bpLo), hi = upperBound(s, e, DATA.bpOf, bpHi);
       const baseColor = (c % 2 === 1) ? col.chrA : col.chrB;
       for (let idx = lo; idx < hi; idx++) {
-        const px = xToPx(DATA.chrOffset[c] + DATA.bpOf[idx]);
+        const px = xToPx(GEOM.chrOffset[c] + DATA.bpOf[idx]);
         const py = yToPx(DATA.negLogP[idx]);
-        const isSig = DATA.negLogP[idx] >= THRESH_NEGLOG;
+        const isSig = DATA.negLogP[idx] >= ACTIVE_THRESH_NEGLOG;
         ctx.fillStyle = isSig ? col.sig : baseColor;
         ctx.beginPath(); ctx.arc(px, py, isSig ? pointR + 0.4 : pointR, 0, 6.2832); ctx.fill();
       }
@@ -355,6 +575,12 @@
     ctx.strokeStyle = '#c9d3e4';
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(plotLeft, plotBottom); ctx.lineTo(plotRight, plotBottom); ctx.stroke();
+
+    ctx.fillStyle = col.muted;
+    ctx.font = '10.5px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(FILTERED_SNPS_NOTE, (plotLeft + plotRight) / 2, plotBottom - 4);
   }
 
   /* ------------------------------------------------------------------ *
@@ -367,11 +593,11 @@
     const rect = DOM.miniCanvas.getBoundingClientRect();
     const w = rect.width;
     const binCount = Math.max(200, Math.min(MINI_BIN_COUNT, Math.round(w)));
-    const binW = DATA.TOTAL_CUM / binCount;
+    const binW = GEOM.TOTAL_CUM / binCount;
     const bins = new Array(binCount);
     for (let b = 0; b < binCount; b++) bins[b] = { maxNL: 0, chr: 0 };
     for (let i = 0; i < DATA.n; i++) {
-      const cp = DATA.chrOffset[DATA.chrOf[i]] + DATA.bpOf[i];
+      const cp = GEOM.chrOffset[DATA.chrOf[i]] + DATA.bpOf[i];
       const b = Math.min(binCount - 1, Math.floor(cp / binW));
       if (DATA.negLogP[i] > bins[b].maxNL) { bins[b].maxNL = DATA.negLogP[i]; bins[b].chr = DATA.chrOf[i]; }
       else if (bins[b].chr === 0) bins[b].chr = DATA.chrOf[i];
@@ -395,7 +621,7 @@
       if (bin.chr === 0) continue;
       const barH = Math.max(1, (bin.maxNL / DATA.Y_MAX) * usableH);
       const x = b * pxPerBin;
-      const isSig = bin.maxNL >= THRESH_NEGLOG;
+      const isSig = bin.maxNL >= ACTIVE_THRESH_NEGLOG;
       ctx.fillStyle = isSig ? col.sig : ((bin.chr % 2 === 1) ? col.chrA : col.chrB);
       ctx.fillRect(x, h - padBottom - barH, Math.max(1, pxPerBin), barH);
     }
@@ -414,8 +640,8 @@
     const w = rect.width, h = rect.height;
     const col = chartColors();
     renderMinimapBackgroundOnly();
-    const x0 = (view.x0 / DATA.TOTAL_CUM) * w;
-    const x1 = (view.x1 / DATA.TOTAL_CUM) * w;
+    const x0 = (view.x0 / GEOM.TOTAL_CUM) * w;
+    const x1 = (view.x1 / GEOM.TOTAL_CUM) * w;
     ctx.fillStyle = col.viewportFill;
     ctx.fillRect(x0, 0, Math.max(1, x1 - x0), h);
     ctx.strokeStyle = col.viewportBorder;
@@ -540,8 +766,8 @@
 
   function combinedCoordLabel(cumMin, cumMax) {
     const cA = chrForCum(cumMin), cB = chrForCum(cumMax);
-    const bpA = Math.max(0, Math.min(DATA.chrLen[cA], cumMin - DATA.chrOffset[cA]));
-    const bpB = Math.max(0, Math.min(DATA.chrLen[cB], cumMax - DATA.chrOffset[cB]));
+    const bpA = Math.max(0, Math.min(GEOM.chrLen[cA], cumMin - GEOM.chrOffset[cA]));
+    const bpB = Math.max(0, Math.min(GEOM.chrLen[cB], cumMax - GEOM.chrOffset[cB]));
     return cA === cB
       ? ('Chr' + cA + ':' + fmtBp(bpA) + '–' + fmtBp(bpB))
       : ('Chr' + cA + ':' + fmtBp(bpA) + ' – Chr' + cB + ':' + fmtBp(bpB));
@@ -591,7 +817,7 @@
   function jumpFromMinimap(e) {
     const rect = DOM.miniCanvas.getBoundingClientRect();
     const px = e.clientX - rect.left;
-    const cp = (px / rect.width) * DATA.TOTAL_CUM;
+    const cp = (px / rect.width) * GEOM.TOTAL_CUM;
     const span = view.x1 - view.x0;
     if (DOM.chrJump) DOM.chrJump.value = '';
     setView(cp - span / 2, cp + span / 2);
@@ -619,7 +845,7 @@
 
   function showTooltip(idx, clientX, clientY) {
     const f = DATA.fields[idx];
-    const isSig = DATA.negLogP[idx] >= THRESH_NEGLOG;
+    const isSig = DATA.negLogP[idx] >= ACTIVE_THRESH_NEGLOG;
     const wrapRect = DOM.plotCanvas.parentElement.getBoundingClientRect();
     DOM.tooltip.innerHTML =
       '<div class="coord">Chr' + f[0] + ':' + fmtBp(parseInt(f[2], 10)) + '</div>' +
@@ -661,7 +887,7 @@
 
   function coordLabelAt(cumPos) {
     const c = chrForCum(cumPos);
-    const bp = Math.max(0, Math.min(DATA.chrLen[c], cumPos - DATA.chrOffset[c]));
+    const bp = Math.max(0, Math.min(GEOM.chrLen[c], cumPos - GEOM.chrOffset[c]));
     return 'Chr' + c + ':' + fmtBp(bp);
   }
 
@@ -695,10 +921,10 @@
     if (DOM.chrJump) DOM.chrJump.value = '';
     if (found) {
       const pad = Math.max((bpHi - bpLo) * 0.08, 200);
-      setView(DATA.chrOffset[chrNum] + Math.max(0, bpLo - pad), DATA.chrOffset[chrNum] + Math.min(DATA.chrLen[chrNum], bpHi + pad));
+      setView(GEOM.chrOffset[chrNum] + Math.max(0, bpLo - pad), GEOM.chrOffset[chrNum] + Math.min(GEOM.chrLen[chrNum], bpHi + pad));
     } else {
       searchWarn('No SNPs in Chr' + chrNum + ':' + fmtBp(bpLo) + '–' + fmtBp(bpHi) + ' — showing the surrounding region.');
-      setView(DATA.chrOffset[chrNum] + Math.max(0, bpLo - 1000), DATA.chrOffset[chrNum] + Math.min(DATA.chrLen[chrNum], bpHi + 1000));
+      setView(GEOM.chrOffset[chrNum] + Math.max(0, bpLo - 1000), GEOM.chrOffset[chrNum] + Math.min(GEOM.chrLen[chrNum], bpHi + 1000));
     }
   }
 
@@ -711,12 +937,12 @@
     }
     if (DOM.chrJump) DOM.chrJump.value = '';
     if (exact) {
-      const halfSpan = Math.max(MIN_SPAN, DATA.chrLen[chrNum] * 0.01);
-      const cp = DATA.chrOffset[chrNum] + bp;
+      const halfSpan = Math.max(MIN_SPAN, GEOM.chrLen[chrNum] * 0.01);
+      const cp = GEOM.chrOffset[chrNum] + bp;
       setView(cp - halfSpan, cp + halfSpan);
     } else {
       searchWarn('No SNP at Chr' + chrNum + ':' + fmtBp(bp) + ' — showing the surrounding region.');
-      setView(DATA.chrOffset[chrNum] + Math.max(0, bp - 1000), DATA.chrOffset[chrNum] + Math.min(DATA.chrLen[chrNum], bp + 1000));
+      setView(GEOM.chrOffset[chrNum] + Math.max(0, bp - 1000), GEOM.chrOffset[chrNum] + Math.min(GEOM.chrLen[chrNum], bp + 1000));
     }
   }
 
@@ -746,8 +972,8 @@
     const qLower = raw.toLowerCase();
     for (let i = 0; i < DATA.n; i++) {
       if (DATA.fields[i][1].toLowerCase() === qLower) {
-        const cp = DATA.chrOffset[DATA.chrOf[i]] + DATA.bpOf[i];
-        const halfSpan = Math.max(MIN_SPAN, DATA.chrLen[DATA.chrOf[i]] * 0.01);
+        const cp = GEOM.chrOffset[DATA.chrOf[i]] + DATA.bpOf[i];
+        const halfSpan = Math.max(MIN_SPAN, GEOM.chrLen[DATA.chrOf[i]] * 0.01);
         if (DOM.chrJump) DOM.chrJump.value = '';
         setView(cp - halfSpan, cp + halfSpan);
         return;
@@ -762,23 +988,23 @@
   function openRegionPanel(cumMin, cumMax) {
     const indices = [], sigIndices = [], chrsTouched = [];
     for (let c = 1; c <= CFG.chrCount; c++) {
-      const segX0 = DATA.chrOffset[c], segX1 = DATA.chrOffset[c] + DATA.chrLen[c];
+      const segX0 = GEOM.chrOffset[c], segX1 = GEOM.chrOffset[c] + GEOM.chrLen[c];
       if (segX1 < cumMin || segX0 > cumMax) continue;
-      const bpLo = Math.max(0, cumMin - DATA.chrOffset[c]);
-      const bpHi = Math.min(DATA.chrLen[c], cumMax - DATA.chrOffset[c]);
+      const bpLo = Math.max(0, cumMin - GEOM.chrOffset[c]);
+      const bpHi = Math.min(GEOM.chrLen[c], cumMax - GEOM.chrOffset[c]);
       const s = DATA.chrStart[c], e = DATA.chrEnd[c];
       if (s === -1) continue;
       const lo = lowerBound(s, e, DATA.bpOf, bpLo), hi = upperBound(s, e, DATA.bpOf, bpHi);
       if (hi > lo) chrsTouched.push(c);
       for (let idx = lo; idx < hi; idx++) {
         indices.push(idx);
-        if (DATA.negLogP[idx] >= THRESH_NEGLOG) sigIndices.push(idx);
+        if (DATA.negLogP[idx] >= ACTIVE_THRESH_NEGLOG) sigIndices.push(idx);
       }
     }
     const startChr = chrsTouched[0] || chrForCum(cumMin);
     const endChr = chrsTouched[chrsTouched.length - 1] || chrForCum(cumMax);
-    const bpStart = Math.max(0, cumMin - DATA.chrOffset[startChr]);
-    const bpEnd = Math.max(0, cumMax - DATA.chrOffset[endChr]);
+    const bpStart = Math.max(0, cumMin - GEOM.chrOffset[startChr]);
+    const bpEnd = Math.max(0, cumMax - GEOM.chrOffset[endChr]);
     const chrLabel = chrsTouched.length <= 1 ? ('Chr ' + startChr) : ('Chr ' + startChr + '–' + endChr);
     const coordLabel = chrsTouched.length <= 1
       ? ('Chr' + startChr + ':' + fmtBp(bpStart) + '–' + fmtBp(bpEnd))
@@ -790,6 +1016,7 @@
       chrLabel: chrLabel, coordLabel: coordLabel, spanLabel: fmtMb(cumMax - cumMin),
     };
     regionFilter = 'all';
+    sortCol = null; sortDir = 'asc';
     if (DOM.filterAll) DOM.filterAll.classList.add('on');
     if (DOM.filterSig) DOM.filterSig.classList.remove('on');
     renderRegionPanel();
@@ -804,7 +1031,10 @@
     DOM.statTotal.textContent = currentRegion.indices.length.toLocaleString();
     DOM.statSig.textContent = currentRegion.sigIndices.length.toLocaleString();
 
-    const list = regionFilter === 'sig' ? currentRegion.sigIndices : currentRegion.indices;
+    let list = regionFilter === 'sig' ? currentRegion.sigIndices : currentRegion.indices;
+    if (sortCol) list = sortedIndices(list, sortCol, sortDir);
+    currentTableList = list;
+    if (DOM.tableHead) DOM.tableHead.innerHTML = tableHeadHTML();
     DOM.tableBody.innerHTML = '';
     if (list.length === 0) {
       DOM.emptyState.style.display = 'block';
@@ -817,7 +1047,7 @@
       let rowsHtml = '';
       for (let k = 0; k < cap; k++) {
         const idx = list[k], f = DATA.fields[idx];
-        const isSig = DATA.negLogP[idx] >= THRESH_NEGLOG;
+        const isSig = DATA.negLogP[idx] >= ACTIVE_THRESH_NEGLOG;
         rowsHtml += '<tr class="' + (isSig ? 'sig' : '') + '">' +
           '<td class="snpid">' + f[1] + '</td>' +
           '<td>' + f[0] + '</td>' +
@@ -835,7 +1065,6 @@
         ? ('showing first ' + TABLE_CAP.toLocaleString() + ' of ' + list.length.toLocaleString() + ' — export for full list')
         : (list.length.toLocaleString() + ' shown');
     }
-    updateSendVersityState();
   }
 
   function closePanel() {
@@ -844,35 +1073,125 @@
   }
 
   /* ------------------------------------------------------------------ *
-   *  SEND REGION TO SNPVERSITY — the cross-tool handoff. A region has   *
-   *  no meaning across chromosomes in SNPVersity's single-S.chr model,  *
-   *  so this only enables when the selection sits on one chromosome.    *
+   *  SEND TO SNPVERSITY — one combined handoff, region and NAM           *
+   *  accessions each gated by their own checkbox so either or both can  *
+   *  go together. A region has no meaning across chromosomes in         *
+   *  SNPVersity's single-S.chr model (checkbox disabled off a multi-    *
+   *  chromosome selection); accessions are only offered for NAM         *
+   *  datasets, for now. The shared Handoff "Replace current selection"  *
+   *  control only ever governs the accession half — a region-only send  *
+   *  always adds, since there is no accession list to offer or replace  *
+   *  with in that case.                                                 *
    * ------------------------------------------------------------------ */
-  function updateSendVersityState() {
-    if (!DOM.sendVersityBtn) return;
-    const single = !!currentRegion && currentRegion.chrsTouched.length === 1;
-    DOM.sendVersityBtn.disabled = !single;
+  const NAM_FOUNDER_PROJECT_RE = /nested association mapping/i;
+  const NAM_REFERENCE_PROJECT_RE = /Zm-B73-REFERENCE-NAM/i;
+
+  function defaultVersityDatasetId() {
+    return (typeof Data !== 'undefined' && Data.datasets && Data.datasets()[0]) ? Data.datasets()[0].id : '';
+  }
+
+  function namAccessionInfo() {
+    if (typeof Data === 'undefined' || !Data.datasets || !Data.projectsFor || !Data.accessionsFor) return null;
+    const ds = defaultVersityDatasetId();
+    if (!ds) return null;
+    const projects = Data.projectsFor(ds) || [];
+    const wantProjIds = projects
+      .filter(function (p) { return NAM_FOUNDER_PROJECT_RE.test(p.title) || NAM_REFERENCE_PROJECT_RE.test(p.title); })
+      .map(function (p) { return p.id; });
+    if (!wantProjIds.length) return null;
+    const ids = (Data.accessionsFor(ds) || [])
+      .filter(function (a) { return wantProjIds.indexOf(a.proj) !== -1; })
+      .map(function (a) { return a.id; });
+    if (!ids.length) return null;
+    return { dataset: ds, ids: ids };
+  }
+
+  function regionSendable() { return !!currentRegion && currentRegion.chrsTouched.length === 1; }
+  function accessionsOfferable() { return !!activeEntry && activeEntry.population === 'NAM' && !!namAccessionInfo(); }
+
+  /* "Send to SNPVersity" opens a small popup with three independent
+     checkboxes: region, accessions-replace, accessions-add. The two
+     accession checkboxes are mutually exclusive (checking one unchecks
+     the other) since they're two mutually-exclusive merge modes of the
+     same action, not two different things to send. */
+  function openSendPopup() {
+    if (!DOM.sendPopup) return;
+    const canRegion = regionSendable();
+    const canAcc = accessionsOfferable();
+
+    if (DOM.sendRegionChk) { DOM.sendRegionChk.disabled = !canRegion; DOM.sendRegionChk.checked = canRegion; }
+    if (DOM.sendAccReplaceChk) { DOM.sendAccReplaceChk.disabled = !canAcc; DOM.sendAccReplaceChk.checked = false; }
+    if (DOM.sendAccAddChk) { DOM.sendAccAddChk.disabled = !canAcc; DOM.sendAccAddChk.checked = false; }
+
+    const n = (typeof S !== 'undefined' && S.selected) ? S.selected.size : 0;
+    if (DOM.accCountReplace) DOM.accCountReplace.textContent = n;
+    if (DOM.accCountAdd) DOM.accCountAdd.textContent = n;
+
+    updateSendPopupState();
+    DOM.sendPopup.classList.add('open');
+    DOM.sendPopupBackdrop.classList.add('open');
+  }
+
+  function closeSendPopup() {
+    if (DOM.sendPopup) DOM.sendPopup.classList.remove('open');
+    if (DOM.sendPopupBackdrop) DOM.sendPopupBackdrop.classList.remove('open');
+  }
+
+  function onAccReplaceChange() {
+    if (DOM.sendAccReplaceChk.checked && DOM.sendAccAddChk) DOM.sendAccAddChk.checked = false;
+    updateSendPopupState();
+  }
+  function onAccAddChange() {
+    if (DOM.sendAccAddChk.checked && DOM.sendAccReplaceChk) DOM.sendAccReplaceChk.checked = false;
+    updateSendPopupState();
+  }
+
+  function updateSendPopupState() {
+    if (!DOM.sendRegionChk) return;
+    const canRegion = regionSendable();
+    const wantsRegion = canRegion && DOM.sendRegionChk.checked;
+    const wantsReplace = !!DOM.sendAccReplaceChk && DOM.sendAccReplaceChk.checked;
+    const wantsAdd = !!DOM.sendAccAddChk && DOM.sendAccAddChk.checked;
+    if (DOM.sendConfirmBtn) DOM.sendConfirmBtn.disabled = !wantsRegion && !wantsReplace && !wantsAdd;
     if (DOM.hoHint) {
-      DOM.hoHint.textContent = single ? ''
-        : 'Select within a single chromosome to hand this region off to SNPVersity.';
+      DOM.hoHint.textContent = canRegion ? ''
+        : 'This region spans multiple chromosomes, so it can’t be sent to SNPVersity; SNPVersity needs a single continuous region, on one chromosome.';
     }
   }
 
-  function sendRegionToVersity() {
-    if (!currentRegion || currentRegion.chrsTouched.length !== 1) return;
-    if (typeof window.versityRequest !== 'function') return;
-    window.versityRequest({
-      chr: 'chr' + currentRegion.chr,
-      start: currentRegion.bpStart,
-      end: currentRegion.bpEnd,
-      from: 'GWAS Explorer',
-      note: CFG.traitLabel + ' — ' + currentRegion.coordLabel,
-      /* GWAS Explorer has no accession list to offer — 'add' with an empty
-         accessions array leaves whatever the user already picked in
-         SNPVersity untouched, instead of applyPendingRequest's default
-         'replace' silently clearing it down to zero. */
-      merge: 'add',
-    });
+  function confirmSendToVersity() {
+    const canRegion = regionSendable();
+    const wantsRegion = canRegion && !!DOM.sendRegionChk && DOM.sendRegionChk.checked;
+    const wantsReplace = !!DOM.sendAccReplaceChk && DOM.sendAccReplaceChk.checked;
+    const wantsAdd = !!DOM.sendAccAddChk && DOM.sendAccAddChk.checked;
+    const wantsAcc = (wantsReplace || wantsAdd) && accessionsOfferable();
+    if (!wantsRegion && !wantsAcc) return;
+
+    const payload = { from: 'GWAS Explorer' };
+    const noteParts = [];
+
+    if (wantsRegion) {
+      payload.chr = 'chr' + currentRegion.chr;
+      payload.start = currentRegion.bpStart;
+      payload.end = currentRegion.bpEnd;
+      noteParts.push(activeEntry.trait + ' — ' + activeEntry.measure + ' (' + activeEntry.population + ') — ' + currentRegion.coordLabel);
+    }
+    if (wantsAcc) {
+      const info = namAccessionInfo();
+      payload.dataset = info.dataset;
+      payload.accessions = info.ids;
+      payload.merge = wantsReplace ? 'replace' : 'add';
+      noteParts.push('NAM population accessions (B73 v5 reference + NAM founder panel)');
+    } else {
+      /* No accessions in this payload — never let a leftover merge choice
+         apply to (and potentially wipe) the user's existing accession
+         selection when we aren't offering any of our own. */
+      payload.merge = 'add';
+    }
+    payload.note = noteParts.join(' · ');
+
+    if (typeof Handoff !== 'undefined' && Handoff.toVersity) Handoff.toVersity(payload);
+    else if (typeof window.versityRequest === 'function') window.versityRequest(payload);
   }
 
   /* ------------------------------------------------------------------ *
@@ -900,16 +1219,17 @@
 
   function exportAllSignificant() {
     const sigAll = [];
-    for (let i = 0; i < DATA.n; i++) if (DATA.negLogP[i] >= THRESH_NEGLOG) sigAll.push(i);
-    downloadCsv('GWAS_LW_intercept_significant_SNPs_' + sigAll.length, buildCsv(sigAll));
+    for (let i = 0; i < DATA.n; i++) if (DATA.negLogP[i] >= ACTIVE_THRESH_NEGLOG) sigAll.push(i);
+    downloadCsv('GWAS_' + activeEntry.id + '_significant_SNPs_' + sigAll.length, buildCsv(sigAll));
   }
 
   function exportRegion() {
     if (!currentRegion) return;
-    const list = regionFilter === 'sig' ? currentRegion.sigIndices : currentRegion.indices;
+    /* currentTableList is the exact filtered+sorted list currently on
+       screen, so the export always matches what's shown. */
     const label = currentRegion.chrLabel.replace(/\s+/g, '').replace(/[–:]/g, '-');
     const suffix = regionFilter === 'sig' ? 'significant' : 'all';
-    downloadCsv('GWAS_LW_intercept_region_' + label + '_' + suffix, buildCsv(list));
+    downloadCsv('GWAS_' + activeEntry.id + '_region_' + label + '_' + suffix, buildCsv(currentTableList));
   }
 
   /* ------------------------------------------------------------------ *
@@ -924,41 +1244,55 @@
     window.addEventListener('mousemove', onMiniWindowMouseMove);
     window.addEventListener('mouseup', onWindowMouseUp);
     window.addEventListener('resize', resizeCanvases);
+    document.addEventListener('click', function () {
+      if (DOM.modeHelpPop) DOM.modeHelpPop.classList.remove('show');
+    });
   }
 
   /* ------------------------------------------------------------------ *
-   *  PER-VISIT WIRING                                                   *
+   *  PER-VISIT WIRING (plot UI — only called once a dataset is loaded) *
    * ------------------------------------------------------------------ */
   function wireInteractions() {
-    DOM = {
-      plotCanvas: document.getElementById('gwxPlot'),
-      miniCanvas: document.getElementById('gwxMinimap'),
-      selrect: document.getElementById('gwxSelrect'),
-      crosshair: document.getElementById('gwxCrosshair'),
-      selLabelStart: document.getElementById('gwxSelLabelStart'),
-      selLabelEnd: document.getElementById('gwxSelLabelEnd'),
-      tooltip: document.getElementById('gwxTooltip'),
-      readout: document.getElementById('gwxReadout'),
-      chrJump: document.getElementById('gwxChrJump'),
-      snpSearch: document.getElementById('gwxSearch'),
-      searchStatus: document.getElementById('gwxSearchStatus'),
-      modePan: document.getElementById('gwxModePan'),
-      modeSelect: document.getElementById('gwxModeSelect'),
-      panel: document.getElementById('gwxPanel'),
-      panelBackdrop: document.getElementById('gwxPanelBackdrop'),
-      regionCoord: document.getElementById('gwxRegionCoord'),
-      regionSub: document.getElementById('gwxRegionSub'),
-      statTotal: document.getElementById('gwxStatTotal'),
-      statSig: document.getElementById('gwxStatSig'),
-      tableBody: document.getElementById('gwxTableBody'),
-      emptyState: document.getElementById('gwxEmpty'),
-      shownHint: document.getElementById('gwxShownHint'),
-      filterAll: document.getElementById('gwxFilterAll'),
-      filterSig: document.getElementById('gwxFilterSig'),
-      exportRegionBtn: document.getElementById('gwxExportRegionBtn'),
-      sendVersityBtn: document.getElementById('gwxSendVersityBtn'),
-      hoHint: document.getElementById('gwxHoHint'),
-    };
+    DOM.plotCanvas = document.getElementById('gwxPlot');
+    DOM.miniCanvas = document.getElementById('gwxMinimap');
+    DOM.selrect = document.getElementById('gwxSelrect');
+    DOM.crosshair = document.getElementById('gwxCrosshair');
+    DOM.selLabelStart = document.getElementById('gwxSelLabelStart');
+    DOM.selLabelEnd = document.getElementById('gwxSelLabelEnd');
+    DOM.tooltip = document.getElementById('gwxTooltip');
+    DOM.readout = document.getElementById('gwxReadout');
+    DOM.chrJump = document.getElementById('gwxChrJump');
+    DOM.snpSearch = document.getElementById('gwxSearch');
+    DOM.searchStatus = document.getElementById('gwxSearchStatus');
+    DOM.modePan = document.getElementById('gwxModePan');
+    DOM.modeSelect = document.getElementById('gwxModeSelect');
+    DOM.modeHelpBtn = document.getElementById('gwxModeHelpBtn');
+    DOM.modeHelpPop = document.getElementById('gwxModeHelpPop');
+    DOM.panel = document.getElementById('gwxPanel');
+    DOM.panelBackdrop = document.getElementById('gwxPanelBackdrop');
+    DOM.regionCoord = document.getElementById('gwxRegionCoord');
+    DOM.regionSub = document.getElementById('gwxRegionSub');
+    DOM.statTotal = document.getElementById('gwxStatTotal');
+    DOM.statSig = document.getElementById('gwxStatSig');
+    DOM.tableHead = document.getElementById('gwxTableHead');
+    DOM.tableBody = document.getElementById('gwxTableBody');
+    DOM.emptyState = document.getElementById('gwxEmpty');
+    DOM.shownHint = document.getElementById('gwxShownHint');
+    DOM.filterAll = document.getElementById('gwxFilterAll');
+    DOM.filterSig = document.getElementById('gwxFilterSig');
+    DOM.exportRegionBtn = document.getElementById('gwxExportRegionBtn');
+    DOM.openSendBtn = document.getElementById('gwxOpenSendBtn');
+    DOM.sendPopup = document.getElementById('gwxSendPopup');
+    DOM.sendPopupBackdrop = document.getElementById('gwxSendPopupBackdrop');
+    DOM.sendPopupCloseBtn = document.getElementById('gwxSendPopupCloseBtn');
+    DOM.sendPopupCancelBtn = document.getElementById('gwxSendPopupCancelBtn');
+    DOM.sendConfirmBtn = document.getElementById('gwxSendConfirmBtn');
+    DOM.sendRegionChk = document.getElementById('gwxSendRegionChk');
+    DOM.sendAccReplaceChk = document.getElementById('gwxSendAccReplaceChk');
+    DOM.sendAccAddChk = document.getElementById('gwxSendAccAddChk');
+    DOM.accCountReplace = document.getElementById('gwxAccCountReplace');
+    DOM.accCountAdd = document.getElementById('gwxAccCountAdd');
+    DOM.hoHint = document.getElementById('gwxHoHint');
     DOM.plotCtx = DOM.plotCanvas.getContext('2d');
     DOM.miniCtx = DOM.miniCanvas.getContext('2d');
 
@@ -966,21 +1300,25 @@
 
     DOM.plotCanvas.addEventListener('mousedown', onPlotMouseDown);
     DOM.plotCanvas.addEventListener('wheel', onPlotWheel, { passive: false });
-    DOM.plotCanvas.addEventListener('dblclick', function () { setView(0, DATA.TOTAL_CUM); });
+    DOM.plotCanvas.addEventListener('dblclick', function () { setView(0, GEOM.TOTAL_CUM); });
     DOM.miniCanvas.addEventListener('mousedown', function (e) { miniDragging = true; jumpFromMinimap(e); });
 
     document.getElementById('gwxZoomInBtn').addEventListener('click', function () { zoomBy(1 / 1.6); });
     document.getElementById('gwxZoomOutBtn').addEventListener('click', function () { zoomBy(1.6); });
     document.getElementById('gwxPanLeftBtn').addEventListener('click', function () { panBy(-0.4); });
     document.getElementById('gwxPanRightBtn').addEventListener('click', function () { panBy(0.4); });
-    document.getElementById('gwxResetBtn').addEventListener('click', function () { DOM.chrJump.value = ''; setView(0, DATA.TOTAL_CUM); });
+    document.getElementById('gwxResetBtn').addEventListener('click', function () { DOM.chrJump.value = ''; setView(0, GEOM.TOTAL_CUM); });
     DOM.chrJump.addEventListener('change', function () {
       const c = parseInt(DOM.chrJump.value, 10);
-      if (!c) { setView(0, DATA.TOTAL_CUM); return; }
-      setView(DATA.chrOffset[c], DATA.chrOffset[c] + DATA.chrLen[c]);
+      if (!c) { setView(0, GEOM.TOTAL_CUM); return; }
+      setView(GEOM.chrOffset[c], GEOM.chrOffset[c] + GEOM.chrLen[c]);
     });
     DOM.modePan.addEventListener('click', function () { setMode('pan'); });
     DOM.modeSelect.addEventListener('click', function () { setMode('select'); });
+    if (DOM.modeHelpBtn) DOM.modeHelpBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      DOM.modeHelpPop.classList.toggle('show');
+    });
     DOM.snpSearch.addEventListener('keydown', onSearchKeydown);
     DOM.snpSearch.addEventListener('input', clearSearchStatus);
 
@@ -990,27 +1328,238 @@
     DOM.filterSig.addEventListener('click', function () {
       regionFilter = 'sig'; DOM.filterSig.classList.add('on'); DOM.filterAll.classList.remove('on'); renderRegionPanel();
     });
+    DOM.tableHead.addEventListener('click', function (e) {
+      const th = e.target.closest('th[data-sort]');
+      if (!th) return;
+      const key = th.getAttribute('data-sort');
+      if (sortCol === key) sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+      else { sortCol = key; sortDir = 'asc'; }
+      renderRegionPanel();
+    });
     document.getElementById('gwxPanelCloseBtn').addEventListener('click', closePanel);
     DOM.panelBackdrop.addEventListener('click', closePanel);
     DOM.exportRegionBtn.addEventListener('click', exportRegion);
-    DOM.sendVersityBtn.addEventListener('click', sendRegionToVersity);
+    DOM.openSendBtn.addEventListener('click', openSendPopup);
+    DOM.sendPopupCloseBtn.addEventListener('click', closeSendPopup);
+    DOM.sendPopupCancelBtn.addEventListener('click', closeSendPopup);
+    DOM.sendPopupBackdrop.addEventListener('click', closeSendPopup);
+    DOM.sendRegionChk.addEventListener('change', updateSendPopupState);
+    if (DOM.sendAccReplaceChk) DOM.sendAccReplaceChk.addEventListener('change', onAccReplaceChange);
+    if (DOM.sendAccAddChk) DOM.sendAccAddChk.addEventListener('change', onAccAddChange);
+    DOM.sendConfirmBtn.addEventListener('click', confirmSendToVersity);
     document.getElementById('gwxExportAllBtn').addEventListener('click', exportAllSignificant);
 
+    wireThresholdBar();
     wireGlobalOnce();
+  }
+
+  /* ------------------------------------------------------------------ *
+   *  THRESHOLD BAR — Published (the manifest's stored value, as-is) vs  *
+   *  Custom (a live alpha / method calculation). Only re-renders the    *
+   *  plot + minimap + readout (and the region panel, if one is open)    *
+   *  rather than the whole page, so pan/zoom/region state isn't lost.   *
+   * ------------------------------------------------------------------ */
+  function wireThresholdBar() {
+    const published = document.getElementById('gwxThreshPublished');
+    const custom = document.getElementById('gwxThreshCustom');
+    const customControls = document.getElementById('gwxThreshCustomControls');
+    const simpleM = document.getElementById('gwxThreshSimpleM');
+    const bonferroni = document.getElementById('gwxThreshBonferroni');
+    const alphaInput = document.getElementById('gwxAlphaInput');
+    if (!published) return;
+
+    function setSource(src) {
+      threshSource = src;
+      published.classList.toggle('on', src === 'published');
+      custom.classList.toggle('on', src === 'custom');
+      customControls.style.display = src === 'custom' ? 'flex' : 'none';
+      onThresholdChange();
+    }
+    published.addEventListener('click', function () { setSource('published'); });
+    custom.addEventListener('click', function () { setSource('custom'); });
+
+    simpleM.addEventListener('click', function () {
+      if (simpleM.disabled) return;
+      threshMethod = 'simplem';
+      simpleM.classList.add('on'); bonferroni.classList.remove('on');
+      onThresholdChange();
+    });
+    bonferroni.addEventListener('click', function () {
+      if (bonferroni.disabled) return;
+      threshMethod = 'bonferroni';
+      bonferroni.classList.add('on'); simpleM.classList.remove('on');
+      onThresholdChange();
+    });
+
+    function commitAlpha() {
+      const v = parseFloat(alphaInput.value);
+      if (!isFinite(v) || v <= 0 || v >= 1) { alphaInput.value = threshAlpha; return; }
+      threshAlpha = v;
+      onThresholdChange();
+    }
+    alphaInput.addEventListener('change', commitAlpha);
+    alphaInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); commitAlpha(); alphaInput.blur(); } });
+  }
+
+  function onThresholdChange() {
+    recomputeThreshold();
+    renderPlot();
+    renderMinimap();
+    const readout = document.getElementById('gwxThreshReadout');
+    if (readout) readout.innerHTML = threshReadoutText();
+    if (currentRegion) renderRegionPanel();
+  }
+
+  /* ------------------------------------------------------------------ *
+   *  DATASET PICKER — faceted trait/population/publication filter      *
+   * ------------------------------------------------------------------ */
+  function facetFieldHTML(facet, label) {
+    const opts = optionsFor(facet);
+    const cur = selection[facet];
+    let optsHtml = '<option value="">All ' + label.toLowerCase() + 's</option>';
+    opts.forEach(function (o) {
+      optsHtml += '<option value="' + escAttr(o.value) + '"' + (cur === o.value ? ' selected' : '') + '>' +
+        escAttr(o.value) + (o.count > 1 ? ' (' + o.count + ')' : '') + '</option>';
+    });
+    return '<div class="field gwx-picker-field"><label>' + label + '</label>' +
+      '<select id="gwxFacet' + cap1(facet) + '" data-facet="' + facet + '">' + optsHtml + '</select></div>';
+  }
+
+  function measureShort(measure) {
+    if (measure === 'Trait value (intercept)') return 'Trait';
+    if (measure === 'Linear plasticity (slope)') return 'Plasticity';
+    return measure;
+  }
+
+  function chipListHTML(list, activeId) {
+    return '<div class="gwx-picker-chips">' + list.map(function (e) {
+      return '<button class="gwx-chip' + (e.id === activeId ? ' on' : '') + '" data-entry="' + escAttr(e.id) + '" type="button">' +
+        escAttr(e.trait) + ' - ' + escAttr(measureShort(e.measure)) +
+        '<span class="gwx-chip-sub">' + escAttr(e.population) + ' · ' + escAttr(e.publication) + '</span></button>';
+    }).join('') + '</div>';
+  }
+
+  function pickerHTML() {
+    const cands = candidateEntries();
+    let status;
+    if (activeEntry) {
+      const alt = cands.filter(function (e) { return e.id !== activeEntry.id; });
+      status = '<div class="gwx-picker-active">Showing <b>' + escAttr(activeEntry.trait) + '</b> — ' + escAttr(activeEntry.measure) + ' · ' +
+        escAttr(activeEntry.population) + ' · ' + escAttr(activeEntry.publication) +
+        (alt.length ? ' · ' + alt.length + ' other match' + (alt.length === 1 ? '' : 'es') + ' for this filter' : '') +
+        ' <button class="gwx-picker-clear" id="gwxPickerClear" type="button">change dataset</button>' +
+        '</div>' +
+        (alt.length && cands.length <= 8 ? chipListHTML(cands, activeEntry.id) : '');
+    } else if (cands.length === 0) {
+      status = '<div class="gwx-picker-empty">No dataset matches this combination. ' +
+        '<button class="gwx-picker-clear" id="gwxPickerClear" type="button">Clear filters</button></div>';
+    } else {
+      status = '<div class="gwx-picker-empty">' + cands.length + ' datasets match — narrow the filters above' +
+        (cands.length <= 8 ? ', or pick one directly:' : '.') + '</div>' +
+        (cands.length <= 8 ? chipListHTML(cands, null) : '');
+    }
+    return '<div class="card pad gwx-picker">' +
+      '<div class="gwx-picker-row">' +
+        facetFieldHTML('trait', 'Trait') + facetFieldHTML('population', 'Population') + facetFieldHTML('publication', 'Publication') +
+      '</div>' +
+      status +
+    '</div>';
+  }
+
+  function wirePicker() {
+    FACETS.forEach(function (facet) {
+      const el = document.getElementById('gwxFacet' + cap1(facet));
+      if (el) el.addEventListener('change', function () { onFacetChange(facet, el.value); });
+    });
+    const clearBtn = document.getElementById('gwxPickerClear');
+    if (clearBtn) clearBtn.addEventListener('click', function () {
+      selection = { trait: null, measure: null, population: null, publication: null };
+      activeEntry = null; DATA = null; datasetError = null; currentRegion = null;
+      render(document.getElementById('page'));
+    });
+    document.querySelectorAll('.gwx-chip').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        const entry = MANIFEST.find(function (e) { return e.id === btn.getAttribute('data-entry'); });
+        if (!entry) return;
+        setActiveEntry(entry);
+        render(document.getElementById('page'));
+      });
+    });
+    const retry = document.getElementById('gwxDatasetRetry');
+    if (retry) retry.addEventListener('click', function () {
+      datasetError = null;
+      if (activeEntry) loadDataset(activeEntry);
+      render(document.getElementById('page'));
+    });
   }
 
   /* ------------------------------------------------------------------ *
    *  MARKUP                                                             *
    * ------------------------------------------------------------------ */
-  function loadingHTML() {
-    return '<div class="sec"><div class="bar"></div><div><h2 style="font-size:16px">Loading GWAS results…</h2>' +
-      '<p>Fetching ' + escAttr(CFG.csvUrl) + ' — 60,000+ SNPs; this can take a moment on a slow connection.</p></div></div>';
+  function manifestLoadingHTML() {
+    return '<div class="sec"><div class="bar"></div><div><h2 style="font-size:16px">Loading available datasets…</h2>' +
+      '<p>Fetching ' + escAttr(CFG.manifestUrl) + '.</p></div></div>';
   }
-  function errorHTML(err) {
+  function manifestErrorHTML() {
     return '<div class="card pad" style="border-color:#f3c2bd;background:#fff6f5;margin-top:14px">' +
-      '<h3 style="font-family:var(--disp);color:#b42318;margin:0 0 8px">GWAS data failed to load</h3>' +
-      '<p style="margin:0 0 12px;color:var(--muted);font-size:13px">' + escAttr(String(err && err.message || err)) + '</p>' +
-      '<button class="btn" id="gwxRetry">Retry</button></div>';
+      '<h3 style="font-family:var(--disp);color:#b42318;margin:0 0 8px">Could not load the dataset list</h3>' +
+      '<p style="margin:0 0 12px;color:var(--muted);font-size:13px">' + escAttr(String(manifestError && manifestError.message || manifestError)) + '</p>' +
+      '<button class="btn" id="gwxManifestRetry">Retry</button></div>';
+  }
+  function datasetErrorHTML() {
+    return '<div class="card pad" style="border-color:#f3c2bd;background:#fff6f5;margin-top:14px">' +
+      '<h3 style="font-family:var(--disp);color:#b42318;margin:0 0 8px">Dataset failed to load</h3>' +
+      '<p style="margin:0 0 12px;color:var(--muted);font-size:13px">' + escAttr(String(datasetError && datasetError.message || datasetError)) + '</p>' +
+      '<button class="btn" id="gwxDatasetRetry">Retry</button></div>';
+  }
+  function datasetLoadingHTML() {
+    return '<div class="sec"><div class="bar"></div><div><h2 style="font-size:16px">Loading ' + escAttr(activeEntry.trait) + '…</h2>' +
+      '<p>Fetching ' + escAttr(activeEntry.file) + '.</p></div></div>';
+  }
+
+  function formatPValue(p) {
+    return p.toExponential(2).replace(/e([+-])(\d)$/, 'e$10$2');
+  }
+
+  function introHTML() {
+    const totalMarkersStr = activeEntry.totalMarkers != null ? activeEntry.totalMarkers.toLocaleString() : DATA.n.toLocaleString();
+    return '<div class="sec"><div class="bar"></div><div style="width:100%">' +
+      '<div class="n">GWAS MANHATTAN EXPLORER · GCTA MLMA</div>' +
+      '<h2>Scan the genome for trait-associated SNPs</h2>' +
+      '<p style="max-width:none">Trait: <b>' + escAttr(activeEntry.trait) + '</b> · Population: <b>' + escAttr(activeEntry.population) + '</b> · Publication: <b>' + escAttr(activeEntry.publication) + '</b><br>' +
+      'Total markers: <b>' + totalMarkersStr + '</b> · Published significance threshold: <b>p &lt; ' + formatPValue(activeEntry.threshP) + '</b> (−log₁₀P &gt; ' + publishedThreshNegLog().toFixed(2) + ') (' + escAttr(activeEntry.thresholdMethod || 'SimpleM') + ', alpha=' + escAttr(activeEntry.thresholdAlpha) + ')· ' +
+      'Significant markers: <b>' + publishedTotalSig().toLocaleString() + '</b></p>' +
+    '</div></div>';
+  }
+
+  function threshReadoutText() {
+    const label = threshSource === 'published'
+      ? ((activeEntry.thresholdMethod || 'SimpleM') + ', α=' + activeEntry.thresholdAlpha + ' (published)')
+      : (threshMethod === 'bonferroni' ? 'Bonferroni' : 'SimpleM') + ', α=' + threshAlpha;
+    return 'p &lt; ' + formatPValue(ACTIVE_THRESH_P) + ' (−log₁₀P &gt; ' + ACTIVE_THRESH_NEGLOG.toFixed(2) + '), ' + label + ' — <b>' +
+      ACTIVE_TOTAL_SIG.toLocaleString() + '</b> significant';
+  }
+
+  function thresholdBarHTML() {
+    const hasSimpleM = !!activeEntry.effectiveMarkers;
+    const hasBonferroni = !!activeEntry.totalMarkers;
+    return '<div class="card gwx-thresh-bar">' +
+      '<span class="gwx-thresh-label">Significance threshold</span>' +
+      '<div class="gwx-seg" role="group" aria-label="Threshold source">' +
+        '<button id="gwxThreshPublished" class="' + (threshSource === 'published' ? 'on' : '') + '" type="button">Published</button>' +
+        '<button id="gwxThreshCustom" class="' + (threshSource === 'custom' ? 'on' : '') + '" type="button">Custom</button>' +
+      '</div>' +
+      '<div class="gwx-thresh-custom" id="gwxThreshCustomControls" style="display:' + (threshSource === 'custom' ? 'flex' : 'none') + '">' +
+        '<div class="gwx-seg" role="group" aria-label="Threshold method">' +
+          '<button id="gwxThreshSimpleM" class="' + (threshMethod === 'simplem' ? 'on' : '') + '" type="button"' +
+            (hasSimpleM ? '' : ' disabled title="No effective marker count available for this dataset"') + '>SimpleM</button>' +
+          '<button id="gwxThreshBonferroni" class="' + (threshMethod === 'bonferroni' ? 'on' : '') + '" type="button"' +
+            (hasBonferroni ? '' : ' disabled title="No marker count available for this dataset"') + '>Bonferroni</button>' +
+        '</div>' +
+        '<label class="gwx-thresh-alpha">&alpha; <input type="text" id="gwxAlphaInput" value="' + escAttr(threshAlpha) + '" inputmode="decimal" /></label>' +
+      '</div>' +
+      '<span class="gwx-thresh-readout" id="gwxThreshReadout">' + threshReadoutText() + '</span>' +
+    '</div>';
   }
 
   function toolbarHTML() {
@@ -1021,6 +1570,10 @@
         '<div class="gwx-seg" role="group" aria-label="Interaction mode">' +
           '<button id="gwxModePan" class="on" type="button">Pan / Zoom</button>' +
           '<button id="gwxModeSelect" type="button">Select region</button>' +
+        '</div>' +
+        '<div class="gwx-help-wrap">' +
+          '<button class="gwx-help-btn" id="gwxModeHelpBtn" type="button" aria-label="Interaction mode help">?</button>' +
+          '<div class="gwx-help-pop" id="gwxModeHelpPop"><b>Pan / Zoom mode</b>: Drag to pan, scroll to zoom, or hold <b>Shift</b> and drag to zoom into a region.<br><b>Select region mode</b>: Click and drag across a peak to inspect its SNPs, and to send the region and/or accessions to SNPVersity.</div>' +
         '</div>' +
         '<div class="gwx-div"></div>' +
         '<button class="btn gwx-btn-sm" id="gwxResetBtn" type="button">Reset view</button>' +
@@ -1059,8 +1612,7 @@
       '<div class="card gwx-minimap-wrap">' +
         '<p class="gwx-minimap-label">Genome overview</p>' +
         '<canvas id="gwxMinimap"></canvas>' +
-      '</div>' +
-      '<p class="gwx-footnote">Drag to pan, scroll to zoom, or hold <b>Shift</b> and drag to zoom into a region. Switch to <b>Select region</b> and drag across a peak to inspect its SNPs and send the region to SNPVersity.</p>';
+      '</div>';
   }
 
   function panelHTML() {
@@ -1087,21 +1639,62 @@
         '<span class="gwx-hint" id="gwxShownHint"></span>' +
       '</div>' +
       '<div class="gwx-panel-table-wrap">' +
-        '<table class="gwx-table" id="gwxTable"><thead><tr>' +
-          '<th>SNP</th><th>Chr</th><th>BP</th><th>A1/A2</th><th>Freq</th><th>Beta</th><th>SE</th><th>P</th><th>−log₁₀P</th>' +
-        '</tr></thead><tbody id="gwxTableBody"></tbody></table>' +
+        '<table class="gwx-table" id="gwxTable"><thead id="gwxTableHead">' + tableHeadHTML() + '</thead><tbody id="gwxTableBody"></tbody></table>' +
         '<div class="gwx-empty" id="gwxEmpty" style="display:none">No SNPs match this filter in the selected region.</div>' +
       '</div>' +
       '<div class="gwx-panel-foot">' +
-        '<div class="row"><button class="btn" id="gwxExportRegionBtn" type="button">Export shown SNPs (CSV)</button></div>' +
-        '<div class="row"><button class="btn primary" id="gwxSendVersityBtn" type="button">Send region to SNPVersity →</button></div>' +
+        '<div class="row">' +
+          '<button class="btn" id="gwxExportRegionBtn" type="button">Export shown SNPs (CSV)</button>' +
+          '<button class="btn primary" id="gwxOpenSendBtn" type="button">Send to SNPVersity →</button>' +
+        '</div>' +
+      '</div>' +
+    '</aside>' +
+    '<div class="gwx-send-popup-backdrop" id="gwxSendPopupBackdrop"></div>' +
+    '<div class="gwx-send-popup" id="gwxSendPopup" role="dialog" aria-label="Send to SNPVersity">' +
+      '<div class="gwx-send-popup-head">' +
+        '<h3>Send to SNPVersity</h3>' +
+        '<button class="gwx-panel-close" id="gwxSendPopupCloseBtn" aria-label="Close">&times;</button>' +
+      '</div>' +
+      '<div class="gwx-send-popup-body">' +
+        '<label class="gwx-ho-check"><input type="checkbox" id="gwxSendRegionChk">' +
+          '<span>Send this genomic region</span></label>' +
+        (activeEntry.population === 'NAM'
+          ? '<label class="gwx-ho-check"><input type="checkbox" id="gwxSendAccReplaceChk">' +
+              '<span>Send accessions — replace the <b id="gwxAccCountReplace">0</b> accessions currently selected in SNPVersity</span></label>' +
+            '<label class="gwx-ho-check"><input type="checkbox" id="gwxSendAccAddChk">' +
+              '<span>Send accessions — keep the <b id="gwxAccCountAdd">0</b> accessions currently selected in SNPVersity and add to them</span></label>'
+          : '') +
         '<div class="gwx-ho-hint" id="gwxHoHint"></div>' +
       '</div>' +
-    '</aside>';
+      '<div class="gwx-send-popup-foot">' +
+        '<button class="btn" id="gwxSendPopupCancelBtn" type="button">Cancel</button>' +
+        '<button class="btn primary" id="gwxSendConfirmBtn" type="button">Send</button>' +
+      '</div>' +
+    '</div>';
   }
 
   function styleCSS() {
     return '' +
+    '.gwx-picker{margin-top:14px}' +
+    '.gwx-picker-row{display:flex;gap:14px;flex-wrap:wrap}' +
+    '.gwx-picker-field{flex:1 1 200px;min-width:180px;margin:0}' +
+    '.gwx-picker-active{margin-top:12px;font-size:12.5px;color:var(--muted)}' +
+    '.gwx-picker-active b{color:var(--ink)}' +
+    '.gwx-picker-empty{margin-top:12px;font-size:12.5px;color:var(--muted)}' +
+    '.gwx-picker-clear{appearance:none;border:none;background:transparent;color:var(--blue-600);font:inherit;font-size:12.5px;font-weight:600;cursor:pointer;padding:0;margin-left:2px;text-decoration:underline}' +
+    '.gwx-picker-chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}' +
+    '.gwx-chip{appearance:none;border:1px solid var(--line);background:#fff;border-radius:10px;padding:8px 12px;font:inherit;font-size:12.5px;font-weight:600;color:var(--ink);cursor:pointer;text-align:left;transition:.12s}' +
+    '.gwx-chip:hover{border-color:var(--blue);background:var(--blue-50)}' +
+    '.gwx-chip.on{border-color:var(--blue);background:var(--blue-50);color:var(--blue-600)}' +
+    '.gwx-chip-sub{display:block;font-weight:500;font-size:11px;color:var(--muted);margin-top:2px}' +
+    '.gwx-thresh-bar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:9px 12px;margin-top:14px}' +
+    '.gwx-thresh-label{font-size:12.5px;font-weight:600;color:var(--muted)}' +
+    '.gwx-thresh-custom{display:flex;align-items:center;gap:12px;flex-wrap:wrap}' +
+    '.gwx-thresh-alpha{display:flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;color:var(--ink)}' +
+    '.gwx-thresh-alpha input{width:70px;font:inherit;font-family:var(--mono);font-size:12.5px;padding:6px 8px;border-radius:var(--rad-sm);border:1px solid var(--line);background:#fff;color:var(--ink)}' +
+    '.gwx-thresh-alpha input:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 3px var(--blue-50)}' +
+    '.gwx-thresh-readout{margin-left:auto;font-family:var(--mono);font-size:12px;color:var(--blue-600);font-variant-numeric:tabular-nums}' +
+    '.gwx-thresh-readout b{color:var(--ink)}' +
     '.gwx-toolbar{display:flex;flex-direction:column;gap:10px;padding:9px 12px;margin-top:14px}' +
     '.gwx-toolbar-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}' +
     '.gwx-seg{display:inline-flex;background:var(--line-2);border-radius:999px;padding:3px;gap:2px}' +
@@ -1113,6 +1706,12 @@
     '.gwx-search-wrap{position:relative}' +
     '.gwx-search-status{position:absolute;top:100%;left:0;margin-top:6px;background:#fff8ec;border:1px solid #f3e3c2;color:#7a5a17;font-size:11.5px;line-height:1.4;padding:6px 10px;border-radius:8px;box-shadow:var(--shadow-lg);white-space:nowrap;z-index:15;display:none}' +
     '.gwx-search-status.show{display:block}' +
+    '.gwx-help-wrap{position:relative;display:inline-flex}' +
+    '.gwx-help-btn{width:20px;height:20px;border-radius:50%;border:1px solid var(--line);background:#fff;color:var(--muted);font:inherit;font-size:11px;font-weight:700;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;padding:0;line-height:1}' +
+    '.gwx-help-btn:hover{border-color:var(--blue);color:var(--blue-600)}' +
+    '.gwx-help-pop{position:absolute;top:100%;left:0;margin-top:6px;background:#fff;border:1px solid var(--line);color:var(--muted);font-size:11.5px;line-height:1.45;padding:8px 10px;border-radius:8px;box-shadow:var(--shadow-lg);white-space:normal;width:280px;z-index:20;display:none}' +
+    '.gwx-help-pop b{color:var(--ink)}' +
+    '.gwx-help-wrap:hover .gwx-help-pop,.gwx-help-pop.show{display:block}' +
     '.gwx-div{width:1px;align-self:stretch;background:var(--line);margin:2px 2px}' +
     '.gwx-readout{font-family:var(--mono);font-size:12px;color:var(--blue-600);font-weight:500;font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}' +
     '.gwx-readout b{color:var(--ink)}' +
@@ -1139,10 +1738,19 @@
     '#gwxMinimap{display:block;width:100%;height:54px;cursor:pointer;border-radius:var(--rad-sm)}' +
     '.gwx-footnote{font-size:11.5px;color:var(--faint);text-align:center;margin-top:10px}' +
     '.gwx-footnote b{color:var(--muted)}' +
-    '.gwx-panel-backdrop{position:fixed;inset:0;background:rgba(10,15,28,.38);z-index:20;display:none}' +
+    /* z-index above 41 — the site's own .rail nav sits at z-index:40 and would
+       otherwise paint over the left edge of a centered (as opposed to the old
+       right-docked) modal */
+    '.gwx-panel-backdrop{position:fixed;inset:0;background:rgba(10,15,28,.45);z-index:41;display:none}' +
     '.gwx-panel-backdrop.open{display:block}' +
-    '.gwx-panel{position:fixed;top:0;right:0;bottom:0;width:min(480px,92vw);background:#fff;border-left:1px solid var(--line);box-shadow:var(--shadow-lg);z-index:21;display:flex;flex-direction:column;transform:translateX(100%);transition:transform .18s ease}' +
-    '.gwx-panel.open{transform:translateX(0)}' +
+    /* max-height (not a fixed height) so the modal only grows as tall as its
+       content needs, up to the cap; combined with the table's own min-height
+       below, this stops a tall footer from starving the table down to
+       nothing on a shorter laptop viewport. overflow-y is a last-resort
+       fallback — normally the table's own scrollbar is the only one that
+       ever shows. */
+    '.gwx-panel{position:fixed;top:50%;left:50%;width:min(1100px,94vw);max-height:min(88vh,900px);background:#fff;border:1px solid var(--line);border-radius:var(--rad);box-shadow:var(--shadow-lg);z-index:42;display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden;transform:translate(-50%,-50%) scale(.96);opacity:0;pointer-events:none;transition:transform .16s ease,opacity .16s ease}' +
+    '.gwx-panel.open{transform:translate(-50%,-50%) scale(1);opacity:1;pointer-events:auto}' +
     '.gwx-panel-head{display:flex;gap:12px;padding:18px 18px 14px;border-bottom:1px solid var(--line)}' +
     '.gwx-panel-head .bar{width:4px;align-self:stretch;min-height:30px;border-radius:4px;background:var(--green);flex:none;margin-top:2px}' +
     '.gwx-panel-head-body{flex:1;min-width:0}' +
@@ -1157,32 +1765,46 @@
     '.gwx-stat.sig .v{color:#c0392b}' +
     '.gwx-stat .k{font-size:10.5px;color:var(--faint);text-transform:uppercase;letter-spacing:.05em;font-weight:600}' +
     '.gwx-panel-controls{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 18px;border-bottom:1px solid var(--line)}' +
-    '.gwx-panel-table-wrap{flex:1;overflow:auto;padding:0 0 8px}' +
+    '.gwx-panel-table-wrap{flex:1 1 auto;min-height:220px;overflow:auto;padding:0 0 8px}' +
+    '.gwx-panel-head,.gwx-panel-controls,.gwx-panel-foot{flex:0 0 auto}' +
     '.gwx-table{width:100%;border-collapse:collapse;font-size:12px;font-family:var(--mono)}' +
-    '.gwx-table th{position:sticky;top:0;background:#fff;text-align:left;font-family:var(--body);font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--faint);font-weight:700;padding:8px 10px;border-bottom:1px solid var(--line)}' +
+    '.gwx-table th{position:sticky;top:0;background:#fff;text-align:left;font-family:var(--body);font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:var(--faint);font-weight:700;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}' +
+    '.gwx-table th.gwx-sortable{cursor:pointer;user-select:none}' +
+    '.gwx-table th.gwx-sortable:hover{color:var(--blue-600)}' +
+    '.gwx-table th.sorted{color:var(--blue-600)}' +
     '.gwx-table td{padding:6px 10px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums;color:var(--muted);white-space:nowrap}' +
     '.gwx-table td.snpid{color:var(--navy-700);font-weight:700}' +
     '.gwx-table tr.sig td.snpid::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:#c0392b;margin-right:6px}' +
     '.gwx-panel-foot{padding:12px 18px 16px;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:8px}' +
     '.gwx-panel-foot .row{display:flex;gap:8px}' +
+    '.gwx-ho-check{display:flex;align-items:baseline;gap:8px;font-size:13px;color:var(--ink);cursor:pointer;line-height:1.4}' +
+    '.gwx-ho-check input{margin:0;position:relative;top:2px;cursor:pointer;flex:0 0 auto}' +
+    '.gwx-ho-check input:disabled{cursor:not-allowed}' +
+    '.gwx-ho-check input:disabled ~ span{color:var(--faint)}' +
+    '.gwx-ho-check b{font-family:var(--mono)}' +
+    '.gwx-send-popup-backdrop{position:fixed;inset:0;background:rgba(10,15,28,.35);z-index:43;display:none}' +
+    '.gwx-send-popup-backdrop.open{display:block}' +
+    '.gwx-send-popup{position:fixed;top:50%;left:50%;width:min(480px,90vw);max-height:85vh;background:#fff;border:1px solid var(--line);border-radius:var(--rad);box-shadow:var(--shadow-lg);z-index:44;display:flex;flex-direction:column;overflow:hidden;transform:translate(-50%,-50%) scale(.96);opacity:0;pointer-events:none;transition:transform .16s ease,opacity .16s ease}' +
+    '.gwx-send-popup.open{transform:translate(-50%,-50%) scale(1);opacity:1;pointer-events:auto}' +
+    '.gwx-send-popup-head{display:flex;align-items:center;justify-content:space-between;padding:16px 18px 12px;border-bottom:1px solid var(--line)}' +
+    '.gwx-send-popup-head h3{font-family:var(--disp);font-size:15px;font-weight:700;margin:0;color:var(--ink)}' +
+    '.gwx-send-popup-body{padding:16px 18px;display:flex;flex-direction:column;gap:14px;overflow:auto}' +
+    '.gwx-send-popup-foot{padding:12px 18px 16px;border-top:1px solid var(--line);display:flex;justify-content:flex-end;gap:8px}' +
     '.gwx-empty{padding:30px 18px;text-align:center;color:var(--faint);font-size:12.5px}' +
     '.gwx-hint{font-size:12px;color:var(--faint)}' +
     '.gwx-ho-hint{font-size:11px;color:var(--faint);min-height:14px}' +
     '@media (max-width:720px){ .gwx-readout{display:none} #gwxPlot{height:340px} }';
   }
 
+  function datasetBodyHTML() {
+    if (datasetError) return datasetErrorHTML();
+    if (!activeEntry) return '';
+    if (!DATA) return datasetLoadingHTML();
+    return introHTML() + thresholdBarHTML() + toolbarHTML() + plotHTML() + panelHTML();
+  }
+
   function shellHTML() {
-    return '<style>' + styleCSS() + '</style>' +
-    '<div class="sec"><div class="bar"></div><div style="width:100%">' +
-      '<div class="n">GWAS MANHATTAN EXPLORER · GCTA MLMA</div>' +
-      '<h2>Scan the genome for trait-associated SNPs</h2>' +
-      '<p>Trait: <b>' + CFG.traitLabel + '</b> · ' + CFG.chrCount + ' NAM chromosomes, ' + DATA.n.toLocaleString() + ' SNPs · ' +
-      'significance threshold <b>p &lt; ' + CFG.threshLabel + '</b> (SimpleM) — ' + DATA.totalSig.toLocaleString() + ' significant SNPs. ' +
-      'Use "Select Region" mode to drag-select a region to inspect it and download SNPS or hand them off to SNPVersity. Note: SNPs with raw p values above 0.001 (-log10 P < 3) are not shown to save memory. </p>' +
-    '</div></div>' +
-    toolbarHTML() +
-    plotHTML() +
-    panelHTML();
+    return '<style>' + styleCSS() + '</style>' + pickerHTML() + datasetBodyHTML();
   }
 
   /* ------------------------------------------------------------------ *
@@ -1190,25 +1812,24 @@
    * ------------------------------------------------------------------ */
   function render(page) {
     page.className = 'page fade';
-    if (loadError) {
-      page.innerHTML = errorHTML(loadError);
-      const retry = document.getElementById('gwxRetry');
-      if (retry) retry.addEventListener('click', function () { loadError = null; render(page); });
-      return;
-    }
-    if (!DATA) {
-      page.innerHTML = loadingHTML();
-      loadData().then(function () {
-        if (S.tool === 'snpgwas') render(document.getElementById('page'));
-      }).catch(function () {
-        if (S.tool === 'snpgwas') render(document.getElementById('page'));
-      });
+    if (!MANIFEST) {
+      if (manifestError) {
+        page.innerHTML = manifestErrorHTML();
+        const retry = document.getElementById('gwxManifestRetry');
+        if (retry) retry.addEventListener('click', function () { manifestError = null; render(page); });
+        return;
+      }
+      page.innerHTML = manifestLoadingHTML();
+      loadManifest().then(rerenderIfActive).catch(rerenderIfActive);
       return;
     }
     page.innerHTML = shellHTML();
-    wireInteractions();
-    updateReadout();
-    resizeCanvases();
+    wirePicker();
+    if (activeEntry && DATA) {
+      wireInteractions();
+      updateReadout();
+      resizeCanvases();
+    }
   }
 
   SNPTools.register('snpgwas', { render: render });
