@@ -7,11 +7,13 @@
     "file": "GCTA.SNPSV.results.for.Manhattan.ASI_intcp_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_asi_slope",
@@ -21,95 +23,109 @@
     "file": "GCTA.SNPSV.results.for.Manhattan.ASI_slope_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_cd_intcp",
     "trait": "Cob Diameter",
-    "traitCategory": "Yield",
+    "traitCategory": "Yield Component",
     "measure": "Trait value (intercept)",
     "file": "GCTA.SNPSV.results.for.Manhattan.CD_intcp_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_cd_slope",
     "trait": "Cob Diameter",
-    "traitCategory": "Yield",
+    "traitCategory": "Yield Component",
     "measure": "Linear plasticity (slope)",
     "file": "GCTA.SNPSV.results.for.Manhattan.CD_slope_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_cl_intcp",
     "trait": "Cob Length",
-    "traitCategory": "Yield",
+    "traitCategory": "Yield Component",
     "measure": "Trait value (intercept)",
     "file": "GCTA.SNPSV.results.for.Manhattan.CL_intcp_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_cl_slope",
     "trait": "Cob Length",
-    "traitCategory": "Yield",
+    "traitCategory": "Yield Component",
     "measure": "Linear plasticity (slope)",
     "file": "GCTA.SNPSV.results.for.Manhattan.CL_slope_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_cm_intcp",
     "trait": "Cob Mass",
-    "traitCategory": "Yield",
+    "traitCategory": "Yield Component",
     "measure": "Trait value (intercept)",
     "file": "GCTA.SNPSV.results.for.Manhattan.CM_intcp_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_cm_slope",
     "trait": "Cob Mass",
-    "traitCategory": "Yield",
+    "traitCategory": "Yield Component",
     "measure": "Linear plasticity (slope)",
     "file": "GCTA.SNPSV.results.for.Manhattan.CM_slope_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_dta_intcp",
@@ -119,11 +135,13 @@
     "file": "GCTA.SNPSV.results.for.Manhattan.DTA_intcp_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_dta_slope",
@@ -133,11 +151,13 @@
     "file": "GCTA.SNPSV.results.for.Manhattan.DTA_slope_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_dts_intcp",
@@ -147,11 +167,13 @@
     "file": "GCTA.SNPSV.results.for.Manhattan.DTS_intcp_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_dts_slope",
@@ -161,11 +183,13 @@
     "file": "GCTA.SNPSV.results.for.Manhattan.DTS_slope_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_eh_intcp",
@@ -175,11 +199,13 @@
     "file": "GCTA.SNPSV.results.for.Manhattan.EH_intcp_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_eh_slope",
@@ -189,123 +215,141 @@
     "file": "GCTA.SNPSV.results.for.Manhattan.EH_slope_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_em_intcp",
     "trait": "Ear Mass",
-    "traitCategory": "Yield",
+    "traitCategory": "Yield Component",
     "measure": "Trait value (intercept)",
     "file": "GCTA.SNPSV.results.for.Manhattan.EM_intcp_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_em_slope",
     "trait": "Ear Mass",
-    "traitCategory": "Yield",
+    "traitCategory": "Yield Component",
     "measure": "Linear plasticity (slope)",
     "file": "GCTA.SNPSV.results.for.Manhattan.EM_slope_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_ern_intcp",
     "trait": "Ear Row Number",
-    "traitCategory": "Yield",
+    "traitCategory": "Yield Component",
     "measure": "Trait value (intercept)",
     "file": "GCTA.SNPSV.results.for.Manhattan.ERN_intcp_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_ern_slope",
     "trait": "Ear Row Number",
-    "traitCategory": "Yield",
+    "traitCategory": "Yield Component",
     "measure": "Linear plasticity (slope)",
     "file": "GCTA.SNPSV.results.for.Manhattan.ERN_slope_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_kn_intcp",
     "trait": "Kernel Number",
-    "traitCategory": "Yield",
+    "traitCategory": "Yield Component",
     "measure": "Trait value (intercept)",
     "file": "GCTA.SNPSV.results.for.Manhattan.KN_intcp_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_kn_slope",
     "trait": "Kernel Number",
-    "traitCategory": "Yield",
+    "traitCategory": "Yield Component",
     "measure": "Linear plasticity (slope)",
     "file": "GCTA.SNPSV.results.for.Manhattan.KN_slope_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_kpr_intcp",
     "trait": "Kernels per Row",
-    "traitCategory": "Yield",
+    "traitCategory": "Yield Component",
     "measure": "Trait value (intercept)",
     "file": "GCTA.SNPSV.results.for.Manhattan.KPR_intcp_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_kpr_slope",
     "trait": "Kernels per Row",
-    "traitCategory": "Yield",
+    "traitCategory": "Yield Component",
     "measure": "Linear plasticity (slope)",
     "file": "GCTA.SNPSV.results.for.Manhattan.KPR_slope_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_ll_intcp",
@@ -315,11 +359,13 @@
     "file": "GCTA.SNPSV.results.for.Manhattan.LL_intcp_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_ll_slope",
@@ -329,11 +375,13 @@
     "file": "GCTA.SNPSV.results.for.Manhattan.LL_slope_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_lw_intcp",
@@ -343,11 +391,13 @@
     "file": "GCTA.SNPSV.results.for.Manhattan.LW_intcp_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_lw_slope",
@@ -357,11 +407,13 @@
     "file": "GCTA.SNPSV.results.for.Manhattan.LW_slope_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_ph_intcp",
@@ -371,11 +423,13 @@
     "file": "GCTA.SNPSV.results.for.Manhattan.PH_intcp_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_ph_slope",
@@ -385,67 +439,77 @@
     "file": "GCTA.SNPSV.results.for.Manhattan.PH_slope_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_t20kw_intcp",
     "trait": "Weight of 20 Kernels",
-    "traitCategory": "Yield",
+    "traitCategory": "Yield Component",
     "measure": "Trait value (intercept)",
     "file": "GCTA.SNPSV.results.for.Manhattan.T20KW_intcp_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_t20kw_slope",
     "trait": "Weight of 20 Kernels",
-    "traitCategory": "Yield",
+    "traitCategory": "Yield Component",
     "measure": "Linear plasticity (slope)",
     "file": "GCTA.SNPSV.results.for.Manhattan.T20KW_slope_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_tkw_intcp",
     "trait": "Total Kernel Weight",
-    "traitCategory": "Yield",
+    "traitCategory": "Yield Component",
     "measure": "Trait value (intercept)",
     "file": "GCTA.SNPSV.results.for.Manhattan.TKW_intcp_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_tkw_slope",
     "trait": "Total Kernel Weight",
-    "traitCategory": "Yield",
+    "traitCategory": "Yield Component",
     "measure": "Linear plasticity (slope)",
     "file": "GCTA.SNPSV.results.for.Manhattan.TKW_slope_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_tl_intcp",
@@ -455,11 +519,13 @@
     "file": "GCTA.SNPSV.results.for.Manhattan.TL_intcp_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_tl_slope",
@@ -469,11 +535,13 @@
     "file": "GCTA.SNPSV.results.for.Manhattan.TL_slope_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_tpbn_intcp",
@@ -483,11 +551,13 @@
     "file": "GCTA.SNPSV.results.for.Manhattan.TPBN_intcp_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_tpbn_slope",
@@ -497,11 +567,13 @@
     "file": "GCTA.SNPSV.results.for.Manhattan.TPBN_slope_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_ula_intcp",
@@ -511,11 +583,13 @@
     "file": "GCTA.SNPSV.results.for.Manhattan.ULA_intcp_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   },
   {
     "id": "tibbscortes2024_nam_ula_slope",
@@ -525,10 +599,12 @@
     "file": "GCTA.SNPSV.results.for.Manhattan.ULA_slope_fixed.csv",
     "population": "NAM",
     "publication": "Tibbs-Cortes et al. 2024",
+    "publicationUrl": "https://doi.org/10.1101/gr.279027.124",
     "threshP": 4.750729e-7,
     "thresholdMethod": "SimpleM",
     "totalMarkers": 20357783,
     "effectiveMarkers": 105247,
-    "thresholdAlpha": 0.05
+    "thresholdAlpha": 0.05,
+    "gwasMethod": "MLM (GCTA --mlma)"
   }
 ]

@@ -31,8 +31,11 @@
     dataBase:    './data/gwas/',
     chrCount:    10,
   };
-  const FACETS = ['trait', 'population', 'publication'];
+  const FACETS = ['trait', 'traitCategory', 'population', 'publication'];
   const FILTERED_SNPS_NOTE = 'NOTE: SNPs with raw p values above 0.001 (−log₁₀ P < 3) are not shown, to save memory.';
+  /* the hard floor described above, as a number — a chosen threshold looser
+     than this can't be honored since those rows were never in the file */
+  const FLOOR_NEGLOG = 3;
 
   /* ------------------------------------------------------------------ *
    *  SHARED GENOME GEOMETRY — computed once from the same chromosome    *
@@ -93,7 +96,7 @@
    *  given the OTHER set facets, so every offered option leads to at    *
    *  least one real dataset (no dead-end combinations).                 *
    * ------------------------------------------------------------------ */
-  let selection = { trait: null, measure: null, population: null, publication: null };
+  let selection = { trait: null, traitCategory: null, measure: null, population: null, publication: null };
   let activeEntry = null;   // resolved manifest entry currently shown (or being loaded)
 
   function entryMatches(e, sel, excludeFacet) {
@@ -130,7 +133,7 @@
     if (activeEntry && activeEntry.id === entry.id && (DATA || datasetPromiseId === entry.id)) return;
     activeEntry = entry;
     DATA = null; datasetError = null; currentRegion = null;
-    selection = { trait: entry.trait, measure: entry.measure, population: entry.population, publication: entry.publication };
+    selection = { trait: entry.trait, traitCategory: entry.traitCategory, measure: entry.measure, population: entry.population, publication: entry.publication };
     loadDataset(entry);
   }
 
@@ -166,17 +169,51 @@
   let ACTIVE_THRESH_NEGLOG = 0;
   let ACTIVE_TOTAL_SIG = 0;
 
+  /* ------------------------------------------------------------------ *
+   *  BULK EXPORT DIALOG STATE — entirely independent of the live plot's *
+   *  threshSource/threshMethod/threshAlpha above; always resets to the  *
+   *  Published default each time the dialog opens, rather than          *
+   *  inheriting whatever the plot currently happens to be showing.      *
+   * ------------------------------------------------------------------ */
+  let exportOpen = false;
+  let exportBusy = false;
+  let exportScope = 'filtered';   // 'all' | 'filtered' | 'selected'
+  let exportThreshSource = 'published';
+  let exportThreshMethod = 'simplem';
+  let exportThreshAlpha = 0.05;
+  let exportProgress = { phase: '', done: 0, total: 0 };
+  let exportSummary = null;       // {clamped:[entries], failed:[entries]} after a run, shown until dialog closes
+
+  /* Pure: p-value + -log10 for a given entry/source/method/alpha combo,
+     with no dependency on which dataset happens to be active right now —
+     reused by the live plot (against activeEntry) and by bulk export
+     (against any candidate entry, cached or not). */
+  function computeThresholdFor(entry, source, method, alpha) {
+    let p;
+    if (source === 'published') {
+      p = entry.threshP;
+    } else {
+      const denom = method === 'bonferroni' ? entry.totalMarkers : entry.effectiveMarkers;
+      p = denom ? (alpha / denom) : entry.threshP;
+    }
+    return { p: p, negLog: p > 0 ? -Math.log10(p) : 99 };
+  }
+
+  /* Same, but never looser than the floor every CSV is already filtered
+     to — a looser choice would otherwise silently return every row in
+     the file, falsely implying completeness for a cutoff that was never
+     actually applied upstream. */
+  function clampedThreshold(entry, source, method, alpha) {
+    const t = computeThresholdFor(entry, source, method, alpha);
+    const clamped = t.negLog < FLOOR_NEGLOG;
+    return { negLog: clamped ? FLOOR_NEGLOG : t.negLog, clamped: clamped };
+  }
+
   function recomputeThreshold() {
     if (!DATA || !activeEntry) return;
-    let p;
-    if (threshSource === 'published') {
-      p = activeEntry.threshP;
-    } else {
-      const denom = threshMethod === 'bonferroni' ? activeEntry.totalMarkers : activeEntry.effectiveMarkers;
-      p = denom ? (threshAlpha / denom) : activeEntry.threshP;
-    }
-    ACTIVE_THRESH_P = p;
-    ACTIVE_THRESH_NEGLOG = p > 0 ? -Math.log10(p) : 99;
+    const t = computeThresholdFor(activeEntry, threshSource, threshMethod, threshAlpha);
+    ACTIVE_THRESH_P = t.p;
+    ACTIVE_THRESH_NEGLOG = t.negLog;
     let n = 0;
     for (let i = 0; i < DATA.n; i++) if (DATA.negLogP[i] >= ACTIVE_THRESH_NEGLOG) n++;
     ACTIVE_TOTAL_SIG = n;
@@ -263,6 +300,22 @@
       n: n, chrOf: chrOf, bpOf: bpOf, negLogP: negLogP, fields: fields,
       chrStart: chrStart, chrEnd: chrEnd, Y_MAX: Y_MAX,
     };
+  }
+
+  /* Side-effect-free fetch+parse+cache for any manifest entry — unlike
+     loadDataset(), never touches DATA/activeEntry/view. This is what lets
+     bulk export pull in datasets the user never actually visited without
+     disturbing whatever's currently on screen. */
+  function ensureDatasetCached(entry) {
+    if (datasetCache.has(entry.id)) return Promise.resolve(datasetCache.get(entry.id));
+    return fetch(CFG.dataBase + entry.file).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status + ' fetching ' + entry.file);
+      return r.text();
+    }).then(function (raw) {
+      const parsed = parseCsv(raw);
+      datasetCache.set(entry.id, parsed);
+      return parsed;
+    });
   }
 
   /* binary search helpers — dataset is contiguous per chromosome, sorted by bp */
@@ -1199,13 +1252,23 @@
    * ------------------------------------------------------------------ */
   const CSV_HEADER = 'Chr,SNP,bp,A1,A2,Freq,b,se,p,neg_log10_p\n';
 
-  function buildCsv(indices) {
+  /* # -prefixed provenance lines ahead of the header — these files are a
+     one-way export (never re-parsed by this app), so a leading comment is
+     safe; it just carries the dataset's identity/source out of the app
+     with the data, rather than only living on-screen. */
+  function csvSourceComment(entry) {
+    let c = '# ' + entry.trait + ' - ' + measureShort(entry.measure) + ' · ' + entry.population + ' · ' + entry.publication + '\n';
+    if (entry.publicationUrl) c += '# For more information about this dataset, see ' + entry.publicationUrl + '\n';
+    return c;
+  }
+
+  function buildCsv(entry, data, indices) {
     const out = new Array(indices.length);
     for (let k = 0; k < indices.length; k++) {
-      const idx = indices[k], f = DATA.fields[idx];
-      out[k] = f[0] + ',' + f[1] + ',' + f[2] + ',' + f[3] + ',' + f[4] + ',' + f[5] + ',' + f[6] + ',' + f[7] + ',' + f[8] + ',' + DATA.negLogP[idx].toFixed(4);
+      const idx = indices[k], f = data.fields[idx];
+      out[k] = f[0] + ',' + f[1] + ',' + f[2] + ',' + f[3] + ',' + f[4] + ',' + f[5] + ',' + f[6] + ',' + f[7] + ',' + f[8] + ',' + data.negLogP[idx].toFixed(4);
     }
-    return CSV_HEADER + out.join('\n') + '\n';
+    return csvSourceComment(entry) + CSV_HEADER + out.join('\n') + '\n';
   }
 
   function downloadCsv(filenameBase, csvText) {
@@ -1220,7 +1283,7 @@
   function exportAllSignificant() {
     const sigAll = [];
     for (let i = 0; i < DATA.n; i++) if (DATA.negLogP[i] >= ACTIVE_THRESH_NEGLOG) sigAll.push(i);
-    downloadCsv('GWAS_' + activeEntry.id + '_significant_SNPs_' + sigAll.length, buildCsv(sigAll));
+    downloadCsv('GWAS_' + activeEntry.id + '_significant_SNPs_' + sigAll.length, buildCsv(activeEntry, DATA, sigAll));
   }
 
   function exportRegion() {
@@ -1229,7 +1292,280 @@
        screen, so the export always matches what's shown. */
     const label = currentRegion.chrLabel.replace(/\s+/g, '').replace(/[–:]/g, '-');
     const suffix = regionFilter === 'sig' ? 'significant' : 'all';
-    downloadCsv('GWAS_' + activeEntry.id + '_region_' + label + '_' + suffix, buildCsv(currentTableList));
+    downloadCsv('GWAS_' + activeEntry.id + '_region_' + label + '_' + suffix, buildCsv(activeEntry, DATA, currentTableList));
+  }
+
+  /* ------------------------------------------------------------------ *
+   *  BULK EXPORT (Export results…) — zips multiple datasets' significant *
+   *  SNPs at once. JSZip is loaded lazily, only when a zip is actually    *
+   *  needed, rather than as a static <script> tag — unlike d3 (always    *
+   *  needed by PanEffect), this is for one occasional action in one of   *
+   *  many tools, not worth adding to every page load for every user.     *
+   * ------------------------------------------------------------------ */
+  let jszipPromise = null;
+  function loadJSZip() {
+    if (typeof JSZip !== 'undefined') return Promise.resolve(JSZip);
+    if (jszipPromise) return jszipPromise;
+    jszipPromise = new Promise(function (resolve, reject) {
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js';
+      s.onload = function () { resolve(window.JSZip); };
+      s.onerror = function () { jszipPromise = null; reject(new Error('Failed to load JSZip from the CDN.')); };
+      document.head.appendChild(s);
+    });
+    return jszipPromise;
+  }
+
+  function downloadZip(files, zipName) {
+    return loadJSZip().then(function (ZipCtor) {
+      const zip = new ZipCtor();
+      const used = new Set();
+      files.forEach(function (f) {
+        let name = exportFilenameFor(f.entry) + '_significant_SNPs.csv', n = 1;
+        while (used.has(name)) { n++; name = exportFilenameFor(f.entry) + '_significant_SNPs_' + n + '.csv'; }
+        used.add(name);
+        zip.file(name, f.csv);
+      });
+      return zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+    }).then(function (blob) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = zipName + '.zip';
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+    });
+  }
+
+  /* ------------------------------------------------------------------ *
+   *  EXPORT DIALOG — "Export results…", opened from the dataset picker  *
+   *  card (visible even before any dataset is selected, since "all" /   *
+   *  "filtered" scope don't need one). renderExportPopup() regenerates  *
+   *  only this popup's own subtree from state — never the whole page —  *
+   *  so a bulk export's progress ticks don't disturb the plot, picker,  *
+   *  or scroll position while it runs.                                  *
+   * ------------------------------------------------------------------ */
+  function exportProgressText() {
+    if (exportProgress.phase === 'fetching') {
+      return 'Fetching ' + exportProgress.done + ' of ' + exportProgress.total +
+        ' dataset' + (exportProgress.total === 1 ? '' : 's') + '…';
+    }
+    if (exportProgress.phase === 'zipping') return 'Building zip file…';
+    return '';
+  }
+
+  function exportSummaryHTML() {
+    if (!exportSummary) return '';
+    const parts = [];
+    if (exportSummary.clamped.length) {
+      parts.push('Threshold capped at p &le; 0.001 (&minus;log&#8321;&#8320;P &ge; 3) for ' +
+        exportSummary.clamped.length + ' dataset' + (exportSummary.clamped.length === 1 ? '' : 's') +
+        ' — results below that were never available.');
+    }
+    if (exportSummary.failed.length) {
+      parts.push('Could not fetch: ' + exportSummary.failed.map(function (e) {
+        return escAttr(e.trait + ' — ' + measureShort(e.measure));
+      }).join(', ') + '.');
+    }
+    if (exportSummary.zipError) parts.push('Zip build failed: ' + escAttr(exportSummary.zipError));
+    if (!parts.length) parts.push('Done.');
+    return '<div class="gwx-export-note">' + parts.join(' ') + '</div>';
+  }
+
+  /* Which entries the current scope choice resolves to — shared by the
+     threshold-validity check below and runExport() so they can never
+     disagree about what's about to be exported. */
+  function resolveExportEntries() {
+    return exportScope === 'all' ? MANIFEST.slice()
+      : exportScope === 'filtered' ? candidateEntries()
+      : (activeEntry ? [activeEntry] : []);
+  }
+
+  /* True when the currently configured custom threshold is looser than
+     the floor every CSV is already filtered to, for ANY entry the current
+     scope would export — i.e. downloading now would silently imply
+     completeness for a cutoff that was never actually applied upstream. */
+  function exportThresholdInvalid() {
+    if (exportThreshSource !== 'custom') return false;
+    const entries = resolveExportEntries();
+    if (!entries.length) return false;
+    return entries.some(function (e) {
+      return computeThresholdFor(e, exportThreshSource, exportThreshMethod, exportThreshAlpha).negLog < FLOOR_NEGLOG;
+    });
+  }
+
+  function exportPopupBodyHTML() {
+    const cands = candidateEntries();
+    const allCount = MANIFEST.length;
+    const canSelected = !!activeEntry;
+    const busy = exportBusy;
+    const invalid = exportThresholdInvalid();
+    return (
+      '<div class="gwx-send-popup-head">' +
+        '<h3>Export results</h3>' +
+        '<button class="gwx-panel-close" id="gwxExportCloseBtn" aria-label="Close"' + (busy ? ' disabled' : '') + '>&times;</button>' +
+      '</div>' +
+      '<div class="gwx-send-popup-body">' +
+        '<div class="gwx-export-scope">' +
+          '<label class="gwx-ho-check"><input type="radio" name="gwxExportScope" id="gwxExportScopeAll"' +
+            (exportScope === 'all' ? ' checked' : '') + (busy ? ' disabled' : '') + '>' +
+            '<span>All available results <em>(' + allCount + ' dataset' + (allCount === 1 ? '' : 's') + ')</em></span></label>' +
+          '<label class="gwx-ho-check"><input type="radio" name="gwxExportScope" id="gwxExportScopeFiltered"' +
+            (exportScope === 'filtered' ? ' checked' : '') + (busy ? ' disabled' : '') + '>' +
+            '<span>Currently filtered <em>(' + cands.length + ' dataset' + (cands.length === 1 ? '' : 's') + ')</em></span></label>' +
+          '<label class="gwx-ho-check"><input type="radio" name="gwxExportScope" id="gwxExportScopeSelected"' +
+            (exportScope === 'selected' ? ' checked' : '') + (busy || !canSelected ? ' disabled' : '') + '>' +
+            '<span>Currently selected' + (canSelected ? ' <em>(' + escAttr(activeEntry.trait) + ' — ' + escAttr(measureShort(activeEntry.measure)) + ')</em>' : ' <em>(pick a dataset first)</em>') + '</span></label>' +
+        '</div>' +
+        '<div class="gwx-thresh-bar" style="margin-top:0">' +
+          '<span class="gwx-thresh-label">Significance threshold: </span>' +
+          defPopoverHTML('gwxExpThreshHelpBtn', 'gwxExpThreshHelpPop', 'Significance threshold help', EXPORT_THRESH_DEF_TERMS) +
+          '<div class="gwx-seg" role="group" aria-label="Export threshold source">' +
+            '<button id="gwxExpThreshPublished" class="' + (exportThreshSource === 'published' ? 'on' : '') + '" type="button"' + (busy ? ' disabled' : '') + '>Published</button>' +
+            '<button id="gwxExpThreshCustom" class="' + (exportThreshSource === 'custom' ? 'on' : '') + '" type="button"' + (busy ? ' disabled' : '') + '>Custom</button>' +
+          '</div>' +
+          '<div class="gwx-thresh-custom" id="gwxExpThreshCustomControls" style="display:' + (exportThreshSource === 'custom' ? 'flex' : 'none') + '">' +
+            '<div class="gwx-seg" role="group" aria-label="Export threshold method">' +
+              '<button id="gwxExpThreshSimpleM" class="' + (exportThreshMethod === 'simplem' ? 'on' : '') + '" type="button"' + (busy ? ' disabled' : '') + '>SimpleM</button>' +
+              '<button id="gwxExpThreshBonferroni" class="' + (exportThreshMethod === 'bonferroni' ? 'on' : '') + '" type="button"' + (busy ? ' disabled' : '') + '>Bonferroni</button>' +
+            '</div>' +
+            '<label class="gwx-thresh-alpha">&alpha; <input type="text" id="gwxExpAlphaInput" value="' + escAttr(exportThreshAlpha) + '" inputmode="decimal"' + (busy ? ' disabled' : '') + ' /></label>' +
+          '</div>' +
+        '</div>' +
+        // (exportThreshSource === 'custom' ? '<div class="gwx-export-floor-note">Threshold must be at least p &le; 0.001 (&minus;log&#8321;&#8320;P &ge; 3).</div>' : '') +
+        (invalid ? '<div class="gwx-export-note gwx-export-warn">This custom threshold is less stringent than the data\'s floor — every file here only keeps p &le; 0.001 (&minus;log&#8321;&#8320;P &ge; 3). Choose <b>Published</b>, or a stricter &alpha;/method, before exporting.</div>' : '') +
+        (exportProgress.phase ? '<div class="gwx-export-progress" id="gwxExportProgress">' + exportProgressText() + '</div>' : '') +
+        exportSummaryHTML() +
+      '</div>' +
+      '<div class="gwx-send-popup-foot">' +
+        '<button class="btn" id="gwxExportCancelBtn" type="button"' + (busy ? ' disabled' : '') + '>Cancel</button>' +
+        '<button class="btn primary" id="gwxExportConfirmBtn" type="button"' + (busy || invalid ? ' disabled' : '') + ' title="' + (invalid ? 'Choose a valid threshold to enable export' : '') + '">' + (busy ? 'Working…' : 'Export') + '</button>' +
+      '</div>'
+    );
+  }
+
+  function exportDialogHTML() {
+    return '<div class="gwx-send-popup-backdrop" id="gwxExportBackdrop"></div>' +
+      '<div class="gwx-send-popup" id="gwxExportPopup" role="dialog" aria-label="Export results">' + exportPopupBodyHTML() + '</div>';
+  }
+
+  function renderExportPopup() {
+    const popup = document.getElementById('gwxExportPopup');
+    const backdrop = document.getElementById('gwxExportBackdrop');
+    if (!popup || !backdrop) return;
+    popup.innerHTML = exportPopupBodyHTML();
+    popup.classList.toggle('open', exportOpen);
+    backdrop.classList.toggle('open', exportOpen);
+    wireExportPopupInner();
+  }
+
+  /* Wires everything *inside* the popup body — safe to re-run on every
+     renderExportPopup() call since innerHTML just replaced those nodes.
+     The backdrop and the button that opens the dialog live outside this
+     subtree and are wired once from wirePicker() instead. */
+  function wireExportPopupInner() {
+    const closeBtn = document.getElementById('gwxExportCloseBtn');
+    if (!closeBtn) return;
+    closeBtn.addEventListener('click', closeExportDialog);
+    const cancelBtn = document.getElementById('gwxExportCancelBtn');
+    if (cancelBtn) cancelBtn.addEventListener('click', closeExportDialog);
+    const confirmBtn = document.getElementById('gwxExportConfirmBtn');
+    if (confirmBtn) confirmBtn.addEventListener('click', function () { runExport(); });
+    wireHelpPopover('gwxExpThreshHelpBtn', 'gwxExpThreshHelpPop');
+
+    function scopeHandler(scope) { return function () { exportScope = scope; renderExportPopup(); }; }
+    const scopeAll = document.getElementById('gwxExportScopeAll');
+    const scopeFiltered = document.getElementById('gwxExportScopeFiltered');
+    const scopeSelected = document.getElementById('gwxExportScopeSelected');
+    if (scopeAll) scopeAll.addEventListener('change', scopeHandler('all'));
+    if (scopeFiltered) scopeFiltered.addEventListener('change', scopeHandler('filtered'));
+    if (scopeSelected) scopeSelected.addEventListener('change', scopeHandler('selected'));
+
+    const pub = document.getElementById('gwxExpThreshPublished');
+    const custom = document.getElementById('gwxExpThreshCustom');
+    const simpleM = document.getElementById('gwxExpThreshSimpleM');
+    const bonferroni = document.getElementById('gwxExpThreshBonferroni');
+    const alphaInput = document.getElementById('gwxExpAlphaInput');
+    if (pub) pub.addEventListener('click', function () { exportThreshSource = 'published'; renderExportPopup(); });
+    if (custom) custom.addEventListener('click', function () { exportThreshSource = 'custom'; renderExportPopup(); });
+    if (simpleM) simpleM.addEventListener('click', function () { exportThreshMethod = 'simplem'; renderExportPopup(); });
+    if (bonferroni) bonferroni.addEventListener('click', function () { exportThreshMethod = 'bonferroni'; renderExportPopup(); });
+    if (alphaInput) {
+      const commit = function () {
+        const v = parseFloat(alphaInput.value);
+        if (!isFinite(v) || v <= 0 || v >= 1) { alphaInput.value = exportThreshAlpha; return; }
+        exportThreshAlpha = v;
+        renderExportPopup();
+      };
+      alphaInput.addEventListener('change', commit);
+      alphaInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); commit(); alphaInput.blur(); } });
+    }
+  }
+
+  function openExportDialog() {
+    exportOpen = true;
+    exportBusy = false;
+    exportThreshSource = 'published'; exportThreshMethod = 'simplem'; exportThreshAlpha = 0.05;
+    exportProgress = { phase: '', done: 0, total: 0 };
+    exportSummary = null;
+    if (exportScope === 'selected' && !activeEntry) exportScope = 'filtered';
+    renderExportPopup();
+  }
+
+  function closeExportDialog() {
+    if (exportBusy) return;
+    exportOpen = false;
+    renderExportPopup();
+  }
+
+  async function runExport() {
+    if (exportBusy || exportThresholdInvalid()) return;
+    const entries = resolveExportEntries();
+    if (!entries.length) return;
+
+    exportBusy = true;
+    exportSummary = null;
+    exportProgress = { phase: 'fetching', done: 0, total: entries.length };
+    renderExportPopup();
+
+    const failed = [];
+    for (let i = 0; i < entries.length; i++) {
+      if (!datasetCache.has(entries[i].id)) {
+        try { await ensureDatasetCached(entries[i]); }
+        catch (err) { failed.push(entries[i]); }
+      }
+      exportProgress = { phase: 'fetching', done: i + 1, total: entries.length };
+      renderExportPopup();
+    }
+
+    const clamped = [];
+    const files = [];
+    entries.forEach(function (e) {
+      const data = datasetCache.get(e.id);
+      if (!data) return;
+      const c = clampedThreshold(e, exportThreshSource, exportThreshMethod, exportThreshAlpha);
+      if (c.clamped) clamped.push(e);
+      const idx = [];
+      for (let i = 0; i < data.n; i++) if (data.negLogP[i] >= c.negLog) idx.push(i);
+      files.push({ entry: e, csv: buildCsv(e, data, idx) });
+    });
+
+    let zipError = null;
+    try {
+      if (exportScope === 'selected' && files.length === 1) {
+        downloadCsv(exportFilenameFor(files[0].entry) + '_significant_SNPs', files[0].csv);
+      } else if (files.length) {
+        exportProgress = { phase: 'zipping', done: entries.length, total: entries.length };
+        renderExportPopup();
+        await downloadZip(files, 'GWAS_export_' + files.length + '_dataset' + (files.length === 1 ? '' : 's'));
+      }
+    } catch (err) {
+      zipError = String(err && err.message || err);
+    }
+
+    exportBusy = false;
+    exportProgress = { phase: '', done: 0, total: 0 };
+    exportSummary = { clamped: clamped, failed: failed, zipError: zipError };
+    renderExportPopup();
   }
 
   /* ------------------------------------------------------------------ *
@@ -1245,7 +1581,9 @@
     window.addEventListener('mouseup', onWindowMouseUp);
     window.addEventListener('resize', resizeCanvases);
     document.addEventListener('click', function () {
-      if (DOM.modeHelpPop) DOM.modeHelpPop.classList.remove('show');
+      document.querySelectorAll('.gwx-help-pop.show').forEach(function (p) { p.classList.remove('show'); });
+      const traitPop = document.getElementById('gwxTraitDdPop');
+      if (traitPop) traitPop.classList.remove('show');
     });
   }
 
@@ -1307,7 +1645,11 @@
     document.getElementById('gwxZoomOutBtn').addEventListener('click', function () { zoomBy(1.6); });
     document.getElementById('gwxPanLeftBtn').addEventListener('click', function () { panBy(-0.4); });
     document.getElementById('gwxPanRightBtn').addEventListener('click', function () { panBy(0.4); });
-    document.getElementById('gwxResetBtn').addEventListener('click', function () { DOM.chrJump.value = ''; setView(0, GEOM.TOTAL_CUM); });
+    document.getElementById('gwxResetBtn').addEventListener('click', function () {
+      DOM.chrJump.value = '';
+      setView(0, GEOM.TOTAL_CUM);
+      resetThresholdSource();
+    });
     DOM.chrJump.addEventListener('change', function () {
       const c = parseInt(DOM.chrJump.value, 10);
       if (!c) { setView(0, GEOM.TOTAL_CUM); return; }
@@ -1350,6 +1692,9 @@
     document.getElementById('gwxExportAllBtn').addEventListener('click', exportAllSignificant);
 
     wireThresholdBar();
+    wireHelpPopover('gwxThreshHelpBtn', 'gwxThreshHelpPop');
+    wireHelpPopover('gwxRegionHelpBtn', 'gwxRegionHelpPop');
+    wireHelpPopover('gwxIntroHelpBtn', 'gwxIntroHelpPop');
     wireGlobalOnce();
   }
 
@@ -1401,6 +1746,24 @@
     alphaInput.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); commitAlpha(); alphaInput.blur(); } });
   }
 
+  function resetThresholdSource() {
+    if (threshSource === 'published' && threshMethod === 'simplem' && threshAlpha === 0.05) return;
+    threshSource = 'published'; threshMethod = 'simplem'; threshAlpha = 0.05;
+    const published = document.getElementById('gwxThreshPublished');
+    const custom = document.getElementById('gwxThreshCustom');
+    const customControls = document.getElementById('gwxThreshCustomControls');
+    const simpleM = document.getElementById('gwxThreshSimpleM');
+    const bonferroni = document.getElementById('gwxThreshBonferroni');
+    const alphaInput = document.getElementById('gwxAlphaInput');
+    if (published) published.classList.add('on');
+    if (custom) custom.classList.remove('on');
+    if (customControls) customControls.style.display = 'none';
+    if (simpleM) simpleM.classList.add('on');
+    if (bonferroni) bonferroni.classList.remove('on');
+    if (alphaInput) alphaInput.value = threshAlpha;
+    onThresholdChange();
+  }
+
   function onThresholdChange() {
     recomputeThreshold();
     renderPlot();
@@ -1413,6 +1776,8 @@
   /* ------------------------------------------------------------------ *
    *  DATASET PICKER — faceted trait/population/publication filter      *
    * ------------------------------------------------------------------ */
+  const TRAIT_CATEGORY_ORDER = ['Plant Architecture', 'Yield Component', 'Flowering Time'];
+
   function facetFieldHTML(facet, label) {
     const opts = optionsFor(facet);
     const cur = selection[facet];
@@ -1425,10 +1790,69 @@
       '<select id="gwxFacet' + cap1(facet) + '" data-facet="' + facet + '">' + optsHtml + '</select></div>';
   }
 
+  /* Trait picker is a custom dropdown (not a native <select>) so that the
+     category headers can be clicked directly to browse/select a whole
+     category — a native <optgroup> label isn't an interactive element. */
+  function traitDropdownGroups() {
+    function inScope(e) {
+      return (selection.population == null || e.population === selection.population) &&
+        (selection.publication == null || e.publication === selection.publication);
+    }
+    const counts = new Map(), catOf = new Map();
+    MANIFEST.forEach(function (e) {
+      if (!inScope(e)) return;
+      counts.set(e.trait, (counts.get(e.trait) || 0) + 1);
+      catOf.set(e.trait, e.traitCategory);
+    });
+    const groups = new Map();
+    TRAIT_CATEGORY_ORDER.forEach(function (c) { groups.set(c, []); });
+    Array.from(counts.keys()).sort(function (a, b) { return a.localeCompare(b); }).forEach(function (t) {
+      const cat = catOf.get(t) || 'Other';
+      if (!groups.has(cat)) groups.set(cat, []);
+      groups.get(cat).push({ value: t, count: counts.get(t) });
+    });
+    return groups;
+  }
+
+  function traitDropdownHTML() {
+    const groups = traitDropdownGroups();
+    const label = selection.trait || selection.traitCategory || 'All traits';
+    let itemsHtml = '<button class="gwx-trait-dd-opt' + (!selection.trait && !selection.traitCategory ? ' on' : '') +
+      '" data-kind="all" type="button">All traits</button>';
+    groups.forEach(function (list, cat) {
+      if (!list.length) return;
+      const catTotal = list.reduce(function (s, o) { return s + o.count; }, 0);
+      itemsHtml += '<button class="gwx-trait-dd-cat' + (selection.traitCategory === cat && !selection.trait ? ' on' : '') +
+        '" data-kind="category" data-value="' + escAttr(cat) + '" type="button">' + escAttr(cat) +
+        ' <span class="gwx-trait-dd-count">(' + catTotal + ')</span></button>';
+      list.forEach(function (o) {
+        itemsHtml += '<button class="gwx-trait-dd-opt' + (selection.trait === o.value ? ' on' : '') +
+          '" data-kind="trait" data-value="' + escAttr(o.value) + '" type="button">' + escAttr(o.value) +
+          (o.count > 1 ? ' <span class="gwx-trait-dd-count">(' + o.count + ')</span>' : '') + '</button>';
+      });
+    });
+    return '<div class="field gwx-picker-field gwx-trait-dd">' +
+      '<label>Trait</label>' +
+      '<button class="gwx-trait-dd-btn" id="gwxTraitDdBtn" type="button">' + escAttr(label) + '</button>' +
+      '<div class="gwx-trait-dd-pop" id="gwxTraitDdPop">' + itemsHtml + '</div>' +
+    '</div>';
+  }
+
   function measureShort(measure) {
     if (measure === 'Trait value (intercept)') return 'Trait';
     if (measure === 'Linear plasticity (slope)') return 'Plasticity';
     return measure;
+  }
+
+  /* human-readable, filesystem-safe identifier for a manifest entry —
+     used so exported filenames are identifiable outside the app without
+     needing to decode entry.id */
+  function slugify(s) {
+    return String(s == null ? '' : s).trim().replace(/[^\w\s-]/g, '').replace(/\s+/g, '-');
+  }
+  function exportFilenameFor(entry) {
+    return slugify(entry.trait) + '_' + slugify(measureShort(entry.measure)) + '_' +
+      slugify(entry.population) + '_' + slugify(entry.publication);
   }
 
   function chipListHTML(list, activeId) {
@@ -1437,6 +1861,24 @@
         escAttr(e.trait) + ' - ' + escAttr(measureShort(e.measure)) +
         '<span class="gwx-chip-sub">' + escAttr(e.population) + ' · ' + escAttr(e.publication) + '</span></button>';
     }).join('') + '</div>';
+  }
+
+  const CHIP_CAP = 20;
+
+  /* The shared publicationUrl across a set of entries, or null if they
+     don't all cite the same publication (or none have a URL at all). */
+  function sharedPublicationUrl(entries) {
+    if (!entries.length) return null;
+    const url = entries[0].publicationUrl;
+    if (!url) return null;
+    for (let i = 1; i < entries.length; i++) {
+      if (entries[i].publication !== entries[0].publication || entries[i].publicationUrl !== url) return null;
+    }
+    return url;
+  }
+
+  function doiNoteHTML(url) {
+    return url ? '<div class="gwx-picker-doi">For more information about this publication, see <a href="' + escAttr(url) + '" target="_blank" rel="noopener">' + escAttr(url) + '</a></div>' : '';
   }
 
   function pickerHTML() {
@@ -1448,22 +1890,28 @@
         escAttr(activeEntry.population) + ' · ' + escAttr(activeEntry.publication) +
         (alt.length ? ' · ' + alt.length + ' other match' + (alt.length === 1 ? '' : 'es') + ' for this filter' : '') +
         ' <button class="gwx-picker-clear" id="gwxPickerClear" type="button">change dataset</button>' +
+        (activeEntry.publicationUrl ? doiNoteHTML(activeEntry.publicationUrl) : '') +
         '</div>' +
-        (alt.length && cands.length <= 8 ? chipListHTML(cands, activeEntry.id) : '');
+        (alt.length && cands.length <= CHIP_CAP ? chipListHTML(cands, activeEntry.id) : '');
     } else if (cands.length === 0) {
       status = '<div class="gwx-picker-empty">No dataset matches this combination. ' +
         '<button class="gwx-picker-clear" id="gwxPickerClear" type="button">Clear filters</button></div>';
     } else {
-      status = '<div class="gwx-picker-empty">' + cands.length + ' datasets match — narrow the filters above' +
-        (cands.length <= 8 ? ', or pick one directly:' : '.') + '</div>' +
-        (cands.length <= 8 ? chipListHTML(cands, null) : '');
+      status = (selection.publication ? doiNoteHTML(sharedPublicationUrl(cands)) : '') +
+        '<div class="gwx-picker-empty">' + cands.length + ' datasets match — narrow the filters above' +
+        (cands.length <= CHIP_CAP ? ', or pick one directly:' : '.') + '</div>' +
+        (cands.length <= CHIP_CAP ? chipListHTML(cands, null) : '');
     }
     return '<div class="card pad gwx-picker">' +
       '<div class="gwx-picker-row">' +
-        facetFieldHTML('trait', 'Trait') + facetFieldHTML('population', 'Population') + facetFieldHTML('publication', 'Publication') +
+        facetFieldHTML('publication', 'Publication') + traitDropdownHTML() + facetFieldHTML('population', 'Population') +
       '</div>' +
       status +
-    '</div>';
+      '<div class="gwx-picker-export-row">' +
+        '<button class="btn gwx-btn-sm" id="gwxOpenExportBtn" type="button">' + (typeof ICONS !== 'undefined' && ICONS.download ? ICONS.download : '') + ' Export results…</button>' +
+      '</div>' +
+    '</div>' +
+    exportDialogHTML();
   }
 
   function wirePicker() {
@@ -1471,9 +1919,28 @@
       const el = document.getElementById('gwxFacet' + cap1(facet));
       if (el) el.addEventListener('change', function () { onFacetChange(facet, el.value); });
     });
+    const traitDdBtn = document.getElementById('gwxTraitDdBtn');
+    const traitDdPop = document.getElementById('gwxTraitDdPop');
+    if (traitDdBtn && traitDdPop) {
+      traitDdBtn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        traitDdPop.classList.toggle('show');
+      });
+      traitDdPop.querySelectorAll('.gwx-trait-dd-opt,.gwx-trait-dd-cat').forEach(function (btn) {
+        btn.addEventListener('click', function (e) {
+          e.stopPropagation();
+          const kind = btn.getAttribute('data-kind');
+          if (kind === 'all') { selection.trait = null; selection.traitCategory = null; }
+          else if (kind === 'category') { selection.trait = null; selection.traitCategory = btn.getAttribute('data-value'); }
+          else { selection.trait = btn.getAttribute('data-value'); selection.traitCategory = null; }
+          resolveSelection();
+          render(document.getElementById('page'));
+        });
+      });
+    }
     const clearBtn = document.getElementById('gwxPickerClear');
     if (clearBtn) clearBtn.addEventListener('click', function () {
-      selection = { trait: null, measure: null, population: null, publication: null };
+      selection = { trait: null, traitCategory: null, measure: null, population: null, publication: null };
       activeEntry = null; DATA = null; datasetError = null; currentRegion = null;
       render(document.getElementById('page'));
     });
@@ -1491,6 +1958,12 @@
       if (activeEntry) loadDataset(activeEntry);
       render(document.getElementById('page'));
     });
+
+    const openExportBtn = document.getElementById('gwxOpenExportBtn');
+    if (openExportBtn) openExportBtn.addEventListener('click', openExportDialog);
+    const exportBackdrop = document.getElementById('gwxExportBackdrop');
+    if (exportBackdrop) exportBackdrop.addEventListener('click', closeExportDialog);
+    renderExportPopup();
   }
 
   /* ------------------------------------------------------------------ *
@@ -1521,14 +1994,34 @@
     return p.toExponential(2).replace(/e([+-])(\d)$/, 'e$10$2');
   }
 
+  /* Always-visible general header — shown in every state (manifest
+     loading/error, picker, dataset selected), same style as SNPVersity's
+     own top header. Explains the tool once; the per-dataset header below
+     (introHTML) only adds the facts specific to whatever's selected, so
+     the two don't repeat the same framing. */
+  function generalHeaderHTML() {
+    return '<div class="sec"><div class="bar"></div><div style="width:100%">' +
+      '<div class="n">GWAS MANHATTAN PLOT EXPLORER </div>' +
+      '<h2>Explore published GWAS results</h2>' +
+      '<p>Browse Manhattan plots displaying results from curated GWAS publications across traits and populations. ' +
+      'Pick a dataset below, then pan, zoom, and drag-select regions to inspect significant SNPs; ' +
+      'export them as a CSV, or hand a region and/or population off to SNPVersity to keep exploring.</p>' +
+    '</div></div>';
+  }
+
   function introHTML() {
     const totalMarkersStr = activeEntry.totalMarkers != null ? activeEntry.totalMarkers.toLocaleString() : DATA.n.toLocaleString();
     return '<div class="sec"><div class="bar"></div><div style="width:100%">' +
-      '<div class="n">GWAS MANHATTAN EXPLORER · GCTA MLMA</div>' +
-      '<h2>Scan the genome for trait-associated SNPs</h2>' +
-      '<p style="max-width:none">Trait: <b>' + escAttr(activeEntry.trait) + '</b> · Population: <b>' + escAttr(activeEntry.population) + '</b> · Publication: <b>' + escAttr(activeEntry.publication) + '</b><br>' +
-      'Total markers: <b>' + totalMarkersStr + '</b> · Published significance threshold: <b>p &lt; ' + formatPValue(activeEntry.threshP) + '</b> (−log₁₀P &gt; ' + publishedThreshNegLog().toFixed(2) + ') (' + escAttr(activeEntry.thresholdMethod || 'SimpleM') + ', alpha=' + escAttr(activeEntry.thresholdAlpha) + ')· ' +
-      'Significant markers: <b>' + publishedTotalSig().toLocaleString() + '</b></p>' +
+      '<div style="display:flex;align-items:center;gap:8px"><h2 style="font-size:16px;margin:0">Dataset details</h2>' +
+        defPopoverHTML('gwxIntroHelpBtn', 'gwxIntroHelpPop', 'Dataset details definitions', INTRO_DEF_TERMS) +
+      '</div>' +
+      '<p style="max-width:none;margin-top:6px">Trait: <b>' + escAttr(activeEntry.trait) + ' - ' + escAttr(measureShort(activeEntry.measure)) + '</b> · Population: <b>' + escAttr(activeEntry.population) + '</b> · Publication: <b>' +
+      (activeEntry.publicationUrl ? '<a href="' + escAttr(activeEntry.publicationUrl) + '" target="_blank" rel="noopener">' + escAttr(activeEntry.publication) + '</a>' : escAttr(activeEntry.publication)) +
+      '</b> · GWAS method: <b>' + escAttr(activeEntry.gwasMethod) + '</b><br>' +
+      'Total markers: <b>' + totalMarkersStr + '</b> · Published significance threshold: <b>p &lt; ' + formatPValue(activeEntry.threshP) + '</b> (−log₁₀P &gt; ' + publishedThreshNegLog().toFixed(2) + ') (' + escAttr(activeEntry.thresholdMethod || 'SimpleM') + ', α=' + escAttr(activeEntry.thresholdAlpha) + ')· ' +
+      'Significant markers: <b>' + publishedTotalSig().toLocaleString() + '</b>' +
+      (activeEntry.publicationUrl ? '<br>For more information about this dataset, see <a href="' + escAttr(activeEntry.publicationUrl) + '" target="_blank" rel="noopener">' + escAttr(activeEntry.publicationUrl) + '</a>' : '') +
+      '</p>' +
     '</div></div>';
   }
 
@@ -1540,11 +2033,64 @@
       ACTIVE_TOTAL_SIG.toLocaleString() + '</b> significant';
   }
 
+  /* ------------------------------------------------------------------ *
+   *  DEFINITIONS POPOVERS — reuse the Help & FAQ page's own "GWAS       *
+   *  Explorer" glossary (SNPHelp.definitionsFor) rather than duplicate  *
+   *  the wording here, so editing snphelp.js is the one place that     *
+   *  keeps every "?" button in sync. Degrades to nothing (no button)    *
+   *  if SNPHelp hasn't loaded or none of the requested terms exist.     *
+   * ------------------------------------------------------------------ */
+  function gwasDefTerms(names) {
+    if (typeof SNPHelp === 'undefined' || typeof SNPHelp.definitionsFor !== 'function') return [];
+    const items = SNPHelp.definitionsFor('GWAS Explorer') || [];
+    const byName = {};
+    items.forEach(function (pair) { byName[pair[0]] = pair[1]; });
+    return names.filter(function (n) { return byName[n]; }).map(function (n) { return [n, byName[n]]; });
+  }
+
+  /* Turns a bare URL inside already-escaped text into a clickable link,
+     trimming trailing sentence punctuation (periods, commas, closing
+     parens, ...) out of the link itself. */
+  function linkify(escaped) {
+    return escaped.replace(/https?:\/\/[^\s<]+/g, function (url) {
+      let trail = '';
+      while (/[.,;:)]$/.test(url)) { trail = url.slice(-1) + trail; url = url.slice(0, -1); }
+      return '<a href="' + url + '" target="_blank" rel="noopener">' + url + '</a>' + trail;
+    });
+  }
+
+  function defPopoverHTML(btnId, popId, ariaLabel, names) {
+    const terms = gwasDefTerms(names);
+    if (!terms.length) return '';
+    const body = terms.map(function (t) { return '<b>' + escAttr(t[0]) + '</b>: ' + linkify(escAttr(t[1])); }).join('<br>');
+    return '<div class="gwx-help-wrap">' +
+      '<button class="gwx-help-btn" id="' + btnId + '" type="button" aria-label="' + escAttr(ariaLabel) + '">?</button>' +
+      '<div class="gwx-help-pop" id="' + popId + '">' + body + '</div>' +
+    '</div>';
+  }
+
+  function wireHelpPopover(btnId, popId) {
+    const btn = document.getElementById(btnId);
+    const pop = document.getElementById(popId);
+    if (!btn || !pop) return;
+    btn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      document.querySelectorAll('.gwx-help-pop.show').forEach(function (p) { if (p !== pop) p.classList.remove('show'); });
+      pop.classList.toggle('show');
+    });
+  }
+
+  const THRESH_DEF_TERMS = ['Published significance threshold', 'Custom threshold', 'SimpleM', 'Bonferroni', 'α (alpha)', '−log₁₀P', 'Significant markers'];
+  const REGION_DEF_TERMS = ['SNP', 'Chr', 'BP', 'A1/A2', 'Freq', 'Beta', 'SE', 'P', '−log₁₀P'];
+  const INTRO_DEF_TERMS = ['Trait', 'Measure: Trait value (intercept)', 'Measure: Linear plasticity (slope)', 'GWAS method', 'Total markers', 'Significant markers', 'Published significance threshold'];
+  const EXPORT_THRESH_DEF_TERMS = ['Published significance threshold', 'Custom threshold', 'SimpleM', 'Bonferroni', 'α (alpha)'];
+
   function thresholdBarHTML() {
     const hasSimpleM = !!activeEntry.effectiveMarkers;
     const hasBonferroni = !!activeEntry.totalMarkers;
     return '<div class="card gwx-thresh-bar">' +
-      '<span class="gwx-thresh-label">Significance threshold</span>' +
+      '<span class="gwx-thresh-label">Display significance threshold: </span>' +
+      defPopoverHTML('gwxThreshHelpBtn', 'gwxThreshHelpPop', 'Significance threshold help', THRESH_DEF_TERMS) +
       '<div class="gwx-seg" role="group" aria-label="Threshold source">' +
         '<button id="gwxThreshPublished" class="' + (threshSource === 'published' ? 'on' : '') + '" type="button">Published</button>' +
         '<button id="gwxThreshCustom" class="' + (threshSource === 'custom' ? 'on' : '') + '" type="button">Custom</button>' +
@@ -1632,9 +2178,12 @@
         '</div>' +
       '</div>' +
       '<div class="gwx-panel-controls">' +
-        '<div class="gwx-seg" role="group" aria-label="Filter">' +
-          '<button id="gwxFilterAll" class="on" type="button">All SNPs</button>' +
-          '<button id="gwxFilterSig" type="button">Significant only</button>' +
+        '<div style="display:flex;align-items:center;gap:8px">' +
+          '<div class="gwx-seg" role="group" aria-label="Filter">' +
+            '<button id="gwxFilterAll" class="on" type="button">All SNPs</button>' +
+            '<button id="gwxFilterSig" type="button">Significant only</button>' +
+          '</div>' +
+          defPopoverHTML('gwxRegionHelpBtn', 'gwxRegionHelpPop', 'Table column definitions', REGION_DEF_TERMS) +
         '</div>' +
         '<span class="gwx-hint" id="gwxShownHint"></span>' +
       '</div>' +
@@ -1679,10 +2228,18 @@
     '.gwx-picker-row{display:flex;gap:14px;flex-wrap:wrap}' +
     '.gwx-picker-field{flex:1 1 200px;min-width:180px;margin:0}' +
     '.gwx-picker-active{margin-top:12px;font-size:12.5px;color:var(--muted)}' +
+    '.gwx-picker-doi{margin-top:4px;font-size:11.5px;color:var(--faint)}' +
     '.gwx-picker-active b{color:var(--ink)}' +
     '.gwx-picker-empty{margin-top:12px;font-size:12.5px;color:var(--muted)}' +
     '.gwx-picker-clear{appearance:none;border:none;background:transparent;color:var(--blue-600);font:inherit;font-size:12.5px;font-weight:600;cursor:pointer;padding:0;margin-left:2px;text-decoration:underline}' +
     '.gwx-picker-chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}' +
+    '.gwx-picker-export-row{margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}' +
+    '.gwx-export-scope{display:flex;flex-direction:column;gap:10px}' +
+    '.gwx-export-scope em{font-style:normal;color:var(--faint)}' +
+    '.gwx-export-progress{font-size:12.5px;color:var(--blue-600);font-weight:600}' +
+    '.gwx-export-note{font-size:12px;color:#9a6700;background:#fff8e6;border:1px solid #f0dca0;border-radius:var(--rad-sm);padding:8px 10px}' +
+    '.gwx-export-warn{color:#b42318;background:#fff6f5;border-color:#f3c2bd}' +
+    '.gwx-export-floor-note{font-size:11.5px;color:var(--faint)}' +
     '.gwx-chip{appearance:none;border:1px solid var(--line);background:#fff;border-radius:10px;padding:8px 12px;font:inherit;font-size:12.5px;font-weight:600;color:var(--ink);cursor:pointer;text-align:left;transition:.12s}' +
     '.gwx-chip:hover{border-color:var(--blue);background:var(--blue-50)}' +
     '.gwx-chip.on{border-color:var(--blue);background:var(--blue-50);color:var(--blue-600)}' +
@@ -1709,9 +2266,24 @@
     '.gwx-help-wrap{position:relative;display:inline-flex}' +
     '.gwx-help-btn{width:20px;height:20px;border-radius:50%;border:1px solid var(--line);background:#fff;color:var(--muted);font:inherit;font-size:11px;font-weight:700;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;padding:0;line-height:1}' +
     '.gwx-help-btn:hover{border-color:var(--blue);color:var(--blue-600)}' +
-    '.gwx-help-pop{position:absolute;top:100%;left:0;margin-top:6px;background:#fff;border:1px solid var(--line);color:var(--muted);font-size:11.5px;line-height:1.45;padding:8px 10px;border-radius:8px;box-shadow:var(--shadow-lg);white-space:normal;width:280px;z-index:20;display:none}' +
+    '.gwx-help-pop{position:absolute;top:100%;left:0;margin-top:6px;background:#fff;border:1px solid var(--line);color:var(--muted);font-size:11.5px;line-height:1.45;padding:8px 10px;border-radius:8px;box-shadow:var(--shadow-lg);white-space:normal;width:280px;max-height:260px;overflow-y:auto;z-index:20;display:none}' +
     '.gwx-help-pop b{color:var(--ink)}' +
     '.gwx-help-wrap:hover .gwx-help-pop,.gwx-help-pop.show{display:block}' +
+    '.gwx-trait-dd{position:relative}' +
+    '.gwx-trait-dd-btn{width:100%;text-align:left;appearance:none;border:1px solid var(--line);border-radius:9px;padding:9px 11px;font:inherit;font-size:13.5px;font-weight:600;background:#fff;color:var(--ink);cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:8px}' +
+    '.gwx-trait-dd-btn:hover{border-color:var(--blue)}' +
+    '.gwx-trait-dd-btn::after{content:"\\25BE";color:var(--muted);font-size:11px}' +
+    '.gwx-trait-dd-pop{position:absolute;top:100%;left:0;right:0;margin-top:4px;background:#fff;border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow-lg);z-index:20;display:none;max-height:360px;overflow-y:auto;padding:6px}' +
+    '.gwx-trait-dd-pop.show{display:block}' +
+    '.gwx-trait-dd-cat{display:block;width:100%;text-align:left;appearance:none;border:none;background:var(--blue-50);color:var(--blue-600);font:inherit;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;padding:7px 10px;border-radius:6px;cursor:pointer;margin:8px 0 3px}' +
+    '.gwx-trait-dd-cat:first-of-type{margin-top:0}' +
+    '.gwx-trait-dd-cat:hover{border-color:var(--blue)}' +
+    '.gwx-trait-dd-cat.on{background:var(--blue);color:#fff}' +
+    '.gwx-trait-dd-opt{display:block;width:100%;text-align:left;appearance:none;border:none;background:transparent;color:var(--ink);font:inherit;font-size:13px;padding:7px 10px 7px 18px;border-radius:6px;cursor:pointer}' +
+    '.gwx-trait-dd-opt:hover{background:var(--blue-50)}' +
+    '.gwx-trait-dd-opt.on{background:var(--blue-50);color:var(--blue-600);font-weight:600}' +
+    '.gwx-trait-dd-count{color:var(--muted);font-weight:500}' +
+    '.gwx-trait-dd-cat.on .gwx-trait-dd-count{color:rgba(255,255,255,.8)}' +
     '.gwx-div{width:1px;align-self:stretch;background:var(--line);margin:2px 2px}' +
     '.gwx-readout{font-family:var(--mono);font-size:12px;color:var(--blue-600);font-weight:500;font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}' +
     '.gwx-readout b{color:var(--ink)}' +
@@ -1804,7 +2376,7 @@
   }
 
   function shellHTML() {
-    return '<style>' + styleCSS() + '</style>' + pickerHTML() + datasetBodyHTML();
+    return '<style>' + styleCSS() + '</style>' + generalHeaderHTML() + pickerHTML() + datasetBodyHTML();
   }
 
   /* ------------------------------------------------------------------ *
@@ -1814,12 +2386,12 @@
     page.className = 'page fade';
     if (!MANIFEST) {
       if (manifestError) {
-        page.innerHTML = manifestErrorHTML();
+        page.innerHTML = generalHeaderHTML() + manifestErrorHTML();
         const retry = document.getElementById('gwxManifestRetry');
         if (retry) retry.addEventListener('click', function () { manifestError = null; render(page); });
         return;
       }
-      page.innerHTML = manifestLoadingHTML();
+      page.innerHTML = generalHeaderHTML() + manifestLoadingHTML();
       loadManifest().then(rerenderIfActive).catch(rerenderIfActive);
       return;
     }
