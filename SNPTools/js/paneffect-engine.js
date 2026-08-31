@@ -149,6 +149,88 @@
     if (box) { box.innerHTML = ''; box.appendChild(buildLegendBar()); }
   }
 
+  /* ---------------- heterotic-group key (pan view) ------------------
+     The pan-genome rows are one genome/accession each, tinted by
+     heterotic group (support.js colorGenome). The canvas re-render drops
+     the DOM key that pan.js's renderHeatmapPan used to append, so we
+     rebuild it here. Colours mirror colorGenome() exactly — keep the two
+     in sync if either changes. */
+  var HETEROTIC_GROUPS = [
+    { label: 'Stiff stalk',     color: 'black'   },
+    { label: 'Mix',             color: '#666666' },
+    { label: 'Non-stiff-stalk', color: '#455edd' },
+    { label: 'Iodent',          color: '#a807ed' },
+    { label: 'Lancaster',       color: '#da9af5' },
+    { label: 'European flint',  color: '#9ae6f5' },
+    { label: 'Chinese',         color: '#f50707' },
+    { label: 'Tang SiPingTou',  color: '#fa7d7d' },
+    { label: 'Popcorn',         color: '#ce58ce' },
+    { label: 'Sweet corn',      color: 'pink'    },
+    { label: 'Tropical',        color: '#30c727' },
+    { label: 'PanAnd',          color: '#773510' },
+    { label: 'Teosinte',        color: '#ca854c' },
+    { label: 'Hi/Lo',           color: '#1B9E77' }
+  ];
+  function buildHeteroticLegend() {
+    var wrap = document.createElement('div');
+    wrap.style.display = 'inline-block';
+    wrap.style.border = '1px solid #000';
+    wrap.style.borderRadius = '5px';
+    wrap.style.padding = '10px 14px';
+    wrap.style.margin = '12px 0';
+    wrap.style.fontFamily = 'Arial, sans-serif';
+    wrap.style.fontSize = '13px';
+    wrap.style.lineHeight = '1.55';
+    wrap.style.whiteSpace = 'nowrap';   // let the box widen instead of wrapping names
+
+    var title = document.createElement('div');
+    title.innerText = 'Heterotic group';
+    title.style.fontWeight = '600';
+    title.style.textDecoration = 'underline';
+    title.style.marginBottom = '4px';
+    wrap.appendChild(title);
+
+    HETEROTIC_GROUPS.forEach(function (g) {
+      var row = document.createElement('div');
+      row.style.display = 'flex';
+      row.style.alignItems = 'center';
+
+      var sw = document.createElement('span');
+      sw.style.display = 'inline-block';
+      sw.style.width = '12px';
+      sw.style.height = '12px';
+      sw.style.marginRight = '6px';
+      sw.style.borderRadius = '2px';
+      sw.style.background = g.color;
+      sw.style.border = '1px solid rgba(0,0,0,.25)';
+      sw.style.flex = '0 0 auto';
+      row.appendChild(sw);
+
+      var txt = document.createElement('span');
+      txt.innerText = g.label;
+      txt.style.color = g.color;
+      txt.style.whiteSpace = 'nowrap';
+      row.appendChild(txt);
+
+      wrap.appendChild(row);
+    });
+    return wrap;
+  }
+  function populateHeteroticLegend() {
+    var box = document.getElementById('heterotic-legend-pan');
+    if (!box) return;
+    /* Park the key to the right of the zoomed pan view's genome-name
+       labels — those right-hand labels sit at ~x=1206px (window_length =
+       1200) and are tinted by colorGenome(), so a genome's label colour
+       can be read straight across to the named group here. Positioned
+       relative to .heatmap-container-zoom-pan (position:relative). */
+    box.style.position = 'absolute';
+    box.style.top = '4px';
+    box.style.left = (window_length + 220) + 'px';
+    box.innerHTML = '';
+    box.appendChild(buildHeteroticLegend());
+  }
+
   /* ---------------- zoomed-region highlight overlay -------------------
      updateHeatmapZoom() (genome.js) builds the zoomed div-per-cell grid
      directly, clearing and re-populating #zoomed-heatmap on every call —
@@ -616,6 +698,7 @@
       catch (e) { console.error('[PanEffectEngine] pipeline error:', e); }
 
       wireScheme();
+      populateHeteroticLegend();
 
       if (state.variant && state.variant.pos) {
         /* let the sliders finish wiring, then centre on the variant.
@@ -687,7 +770,7 @@
   '<div class="slider-container" id="slider-container-pan"><span id="slider-pan"></span><span id="slider-value-pan">1</span></div>' +
   '<div class="sectionHeader">Heatmap of zoomed in region</div>' +
   '<div id="zoomNumberLine-pan" class="numberLine"></div>' +
-  '<div id="heatmap-container-zoom-pan" class="heatmap-container-zoom-pan"><div id="zoomed-heatmap-pan"></div></div>' +
+  '<div id="heatmap-container-zoom-pan" class="heatmap-container-zoom-pan"><div id="zoomed-heatmap-pan"></div><div id="heterotic-legend-pan" class="pe-heterotic-legend-wrap"></div></div>' +
   '<div id="zoomWTLine-pan" class="numberLine"></div>' +
 '</div>';
   }

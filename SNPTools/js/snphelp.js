@@ -21,6 +21,11 @@ const SNPHelp = (function () {
       what:'The front door of the suite and the starting point for most work. Choose a dataset, type a genomic interval (or a B73 v5 gene model ID), and pick the accessions you want. SNPVersity queries the variant store and returns a color-coded genotype table plus a downloadable VCF — allele states, predicted effects, and DNA/protein language-model scores included.',
       give:'A dataset, a region or gene, and a set of accessions.',
       get:'A genotype table and a VCF. From here, "Send selection to…" hands the same result to any other tool.' },
+    { id:'snpgwas', name:'GWAS Explorer', icon:'gwas', color:'#cf8a12', status:LIVE,
+      tag:'Explore curated GWAS results to identify trait-associated SNPs',
+      what:'Interactive Manhattan plots of curated published GWAS results from accessions included in SNPVersity. Pick a trait or trait type (Plant Architecture, Yield Component, Flowering Time), publication, or population  (currently focused on NAM) to explore. Pan and zoom the canvas plot across all 10 chromosomes, jump to a chromosome or search by SNP ID or coordinate range, and toggle between the study’s published significance threshold and your own custom threshold. Drag-select a peak to open a sortable table of its SNPs, filterable to significant-only, and hand the region and/or the accessions off to SNPVersity. Download all or selected results with P<0.001.',
+      give:'A trait, population, and publication result to view, or arrive with none selected and browse available results.',
+      get:'An interactive Manhattan plot, results downloads, a sortable per-region SNP table, and a hand-off of the selected region and/or NAM accessions to SNPVersity.' },
     { id:'snptrait', name:'SNPTrait', icon:'leaf', color:'#1f8a4c', status:SOON,
       tag:'Connect variation to traits',
       what:'Links genomic variation to phenotype and trait records from the National Germplasm collection. Search, sort, and filter accessions by trait values and metadata, then move a selected set straight into SNPVersity and the rest of the suite.',
@@ -66,11 +71,6 @@ const SNPHelp = (function () {
       what:'Visualizes the predicted effect of every possible amino-acid substitution across a protein using ESM protein-language-model scores. A B73 reference view and a pan-genome view each show a full-length substitution heatmap with a zoomable window, aligned to Pfam domains and predicted secondary structure; the pan-genome view adds the natural variation seen across the maize assemblies, colored by heterotic group. Choose a gene model and an ESM model, or arrive from SNPVersity or SNPFold on a specific missense call and that substitution is highlighted in the MaizeGDB 2026 view.',
       give:'A gene model and an ESM model (ESM1 / ESM2 / ESM3); optionally a missense variant handed off from another tool.',
       get:'B73 and pan-genome substitution heatmaps with domain and secondary-structure context, plus a downloadable per-variant effects file.' },
-    { id:'snpdensity', name:'SNPDensity', icon:'density', color:'#9333ea', status:SOON,
-      tag:'Density & burden',
-      what:'Measures SNP and INDEL density, burden, and distribution across genes and regions to highlight mutational load, constraint, and diversification.',
-      give:'A region or gene set.',
-      get:'Density tracks and burden summaries.' },
     { id:'snpgermplasm', name:'SNPGermplasm', icon:'germ', color:'#16a34a', status:SOON,
       tag:'Collection management',
       what:'Applies genotype-driven analytics to germplasm management, identifying redundancy, uniqueness, and priority materials for curation and deployment.',
@@ -139,6 +139,28 @@ const SNPHelp = (function () {
       ['Dataset', 'A defined variant collection with its own accession panel, filters, included variant types, and score columns.'],
       ['Sites', 'Number of variant positions in the complete dataset, not necessarily the number returned by the current query.'],
       ['Imputed', 'Whether missing genotypes were statistically inferred in that dataset.'],
+    ]},
+    { tool:'GWAS Explorer', color:'#cf8a12', items:[
+      ['SNP', 'The variant’s identifier.'],
+      ['Chr', 'Chromosome carrying the SNP.'],
+      ['BP', 'Genomic coordinate on B73 v5.'],
+      ['A1/A2', 'The two alleles tested at the marker; A1 is the effect allele the beta is estimated against.'],
+      ['Freq', 'Allele frequency of A1 in the GWAS panel.'],
+      ['Beta', 'Estimated allele-substitution effect size.'],
+      ['SE', 'Standard error of the beta estimate.'],
+      ['P', 'Raw p-value for the marker–trait association.'],
+      ['−log₁₀P', 'The p-value transformed as −log₁₀(P) so smaller p-values plot higher; used for the y-axis and the significance threshold.'],
+      ['Trait', 'The phenotype being explored, grouped into Plant Architecture, Yield Component, or Flowering Time.'],
+      ['Measure: Trait value (intercept)', 'GWAS run on the trait value in the mean environment.'],
+      ['Measure: Linear plasticity (slope)', 'GWAS run on the plasticity of a given trait, as modeled by accession-specific linear slope across environments.'],
+      ['GWAS method', 'The association-testing model used to generate the results. These include: MLM (GCTA --mlma), see https://yanglab.westlake.edu.cn/software/gcta/#MLMA.'],
+      ['Total markers', 'The number of markers tested in the complete GWAS, independent of how many are plotted after memory-saving filtering.'],
+      ['Significant markers', 'The number of tested markers at or above the active significance threshold.'],
+      ['Published significance threshold', 'The p-value cutoff reported by the source publication, shown by default on the plot.'],
+      ['Custom threshold', 'A user-chosen alternative to the published threshold, computed live from a chosen method and α.'],
+      ['SimpleM', 'A multiple-testing correction using α divided by the effective number of independent tests, recommended for GWAS.'],
+      ['Bonferroni', 'A multiple-testing correction using α divided by the total marker count, more conservative than SimpleM.'],
+      ['α (alpha)', 'The genome-wide false-positive rate used to compute a significance threshold.'],
     ]},
     { tool:'SNPImpact', color:'#7c3aed', items:[
       ['Gene', 'Gene model associated with the candidate variant.'],
@@ -289,7 +311,7 @@ const SNPHelp = (function () {
     ['Where does the data come from?',
      'A query sends your region and accession list to the server, which reads the real HDF5 variant store, writes a VCF for exactly that slice, and returns it. The tools parse that VCF into the tables and matrices you see, so everything downstream is one consistent result.'],
     ['How do I move a selection between tools?',
-     'Run a query in SNPVersity, then use "Send selection to…" in the top bar (or the buttons on a result). The same genotype matrix is handed to SNPImpact, SNPCompare, SNPTree, SNPMatrix, and SNPTrait without re-querying. SNPMatrix and SNPTree can also pass their set on to each other.'],
+     'Run a query in SNPVersity or highlight a region in GWAS Explorer, then use "Send selection to…" in the top bar (or the buttons on a result). The same genotype matrix is handed to SNPImpact, SNPCompare, SNPTree, SNPMatrix, and SNPTrait without re-querying. SNPMatrix and SNPTree can also pass their set on to each other.'],
     ['Why did a wide region give me a download instead of a table?',
      'Regions larger than one million bases skip the in-browser table and return a downloadable VCF instead, so the page stays responsive. Narrow the interval to get the interactive table back.'],
     ['Why are some cells \u2014 or N/A?',
@@ -297,12 +319,22 @@ const SNPHelp = (function () {
     ['Is there a limit on how many accessions I can compare?',
      'The distance tools warn before doing very large computations in the browser: SNPTree above 250 accessions and SNPMatrix above 400. You can build anyway, it just may be slow. SNPImpact renders up to 1,500 variants at a time.'],
     ['What can I download?',
-     'A VCF from SNPVersity; a CSV distance matrix, PHYLIP, PNG, and SVG from SNPMatrix; Newick, MEGA, and PHYLIP trees from SNPTree. Comparison and impact tables can be exported from their own pages.'],
+     'A VCF from SNPVersity; a CSV distance matrix, PHYLIP, PNG, and SVG from SNPMatrix; Newick, MEGA, and PHYLIP trees from SNPTree. A genome-wide significant-SNP CSV, or a CSV of a selected region, from GWAS Explorer. Comparison and impact tables can be exported from their own pages.'],
     ['Which tools are ready to use now?',
-     'SNPVersity, SNPImpact, SNPFunction, SNPCompare, SNPTree, SNPMatrix, SNPFold, and PanEffect are live. SNPTrait, SNPImpute, SNPDensity, and SNPGermplasm are on the roadmap and marked in development in the sidebar.'],
+     'SNPVersity, GWAS Explorer, SNPImpact, SNPFunction, SNPCompare, SNPTree, SNPMatrix, SNPFold, and PanEffect are live. SNPTrait, SNPImpute, SNPDensity, and SNPGermplasm are on the roadmap and marked in development in the sidebar.'],
   ];
 
   function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+  /* Turns a bare URL inside already-escaped text into a clickable link,
+     trimming trailing sentence punctuation (periods, commas, closing
+     parens, ...) out of the link itself. */
+  function linkify(escaped){
+    return escaped.replace(/https?:\/\/[^\s<]+/g, function(url){
+      let trail = '';
+      while (/[.,;:)]$/.test(url)) { trail = url.slice(-1) + trail; url = url.slice(0, -1); }
+      return '<a href="'+url+'" target="_blank" rel="noopener">'+url+'</a>'+trail;
+    });
+  }
   function ico(k){ return (typeof ICONS!=='undefined' && ICONS[k]) || ''; }
 
   /* ---- dataset table (live from data.js when available) ---- */
@@ -481,7 +513,7 @@ const SNPHelp = (function () {
 
 
   function definitionGroup(g){
-    const items = g.items.map(x=>`<div class="hp-def"><dt>${esc(x[0])}</dt><dd>${esc(x[1])}</dd></div>`).join('');
+    const items = g.items.map(x=>`<div class="hp-def"><dt>${esc(x[0])}</dt><dd>${linkify(esc(x[1]))}</dd></div>`).join('');
     return `<details class="hp-defgroup">
       <summary><span class="hp-defdot" style="background:${g.color}"></span><b>${esc(g.tool)}</b><span class="hp-count">${g.items.length} definitions</span><span class="hp-chev">${ico('caret')}</span></summary>
       <dl class="hp-deflist">${items}</dl>
@@ -520,7 +552,7 @@ const SNPHelp = (function () {
         <div class="hp-h"><span class="hp-n">01</span><h2>How the suite fits together</h2></div>
         <div class="hp-flow">
           <div class="hp-step"><span class="hp-si" style="background:#2563eb">${ico('search')}</span>
-            <b>Query</b><p>In SNPVersity, choose a dataset, a region or gene, and the accessions you care about.</p></div>
+            <b>Query</b><p>In SNPVersity, provide a region or gene and the accessions you care about, or choose them from published results using GWAS Explorer.</p></div>
           <div class="hp-arrow">${ico('caret')}</div>
           <div class="hp-step"><span class="hp-si" style="background:#1f8a4c">${ico('table')}</span>
             <b>Result</b><p>You get a genotype table and a VCF for exactly that slice of the genome.</p></div>
@@ -716,7 +748,15 @@ const SNPHelp = (function () {
     document.head.appendChild(s);
   }
 
+  /* Public lookup so other tools can pull their own definitions subset
+     into an in-page popover instead of duplicating the text — e.g. GWAS
+     Explorer's significance-threshold and region-table "?" buttons. */
+  function definitionsFor(toolName) {
+    const g = DEFINITIONS.find(d => d.tool === toolName);
+    return g ? g.items : [];
+  }
+
   if (typeof SNPTools!=='undefined') SNPTools.register('help', { render });
-  return { render, open };
+  return { render, open, definitionsFor };
 })();
 if (typeof window!=='undefined'){ window.SNPHelp = SNPHelp; window.openHelp = SNPHelp.open; }
