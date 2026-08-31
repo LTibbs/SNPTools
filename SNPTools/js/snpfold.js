@@ -1203,7 +1203,7 @@
   function trackSVG(){
     const s=FD.struct, N=s.length;
     const lolliTop=8, lolliH=58, base=lolliTop+lolliH;      // lollipop baseline
-    const domY=base+6, domH=18, ssY=domY+domH+22, ssH=12, pY=ssY+ssH+10, pH=12;
+    const domY=base+6, domH=18, ssY=domY+domH+22, ssH=12, pY=ssY+ssH+22, pH=12;
     const maxSev=10;
     /* InterProScan site/feature lanes — one horizontal lane per analysis program
        (CDD, PIRSR, SFLD), stacked under the pLDDT strip, mirroring how
@@ -1228,7 +1228,7 @@
       const x1=x(seg.from), x2=x(seg.to);
       g+=`<rect x="${x1.toFixed(1)}" y="${pY}" width="${Math.max(.6,x2-x1).toFixed(1)}" height="${pH}" fill="${seg.key}"/>`;
     });
-    g+=`<text x="0" y="${pY+pH+11}" class="tlab">pLDDT confidence</text>`;
+    g+=`<text x="0" y="${pY-4}" class="tlab">pLDDT confidence</text>`;
 
     // InterProScan site/feature lanes, one per program
     sitePrograms.forEach((program,pi)=>{
@@ -1628,8 +1628,8 @@
     esm:'ESM protein language-model score for the substitution.',
     esm2:'ESM2 protein language-model score (MaizeGDB 2026).',
     esm3:'ESM3 protein language-model score (MaizeGDB 2026).',
-    disorder:'IUPred2 — predicted intrinsic disorder at the residue (0 to 1); higher is more disordered.',
-    anchor2:'ANCHOR2 — likelihood the residue lies in a disordered binding region (0 to 1).',
+    disorder:'IUPred2 intrinsic disorder — how likely this residue sits in a region that does not fold on its own (0 to 1; higher = more disordered).',
+    anchor2:'ANCHOR2 disordered binding — how likely this residue sits in a disordered region that folds upon binding a partner, i.e. a binding-prone segment within disorder (0 to 1; higher = more likely). Not a second disorder score.',
     activity:'Annotated functional site at this residue (e.g. active or binding site), when present.',
     priority:'Integrated evidence tier — TOP, HIGH, MODERATE, LOW.',
     carriers:'Number of accessions carrying this variant (heterozygous plus homozygous).',
@@ -1767,8 +1767,8 @@
         <div class="ck"><div class="kk">Secondary structure</div><div class="vv"><span class="ss-chip ss-${c.ss}">${c.ssLabel}</span></div></div>
         <div class="ck"><div class="kk">AI scores</div><div class="vv mono">${aiScoreSummary(v)}</div></div>
         <div class="ck"><div class="kk">InterProScan activity</div><div class="vv">${activityCell(v.resi)}</div></div>
-        <div class="ck"><div class="kk">Predicted disorder</div><div class="vv">${iupredCell(iupredAt(v.resi)?.disorder)}</div></div>
-        <div class="ck"><div class="kk">Flexibility (Anchor2)</div><div class="vv">${iupredCell(iupredAt(v.resi)?.anchor2)}</div></div>
+        <div class="ck" data-tt="${escFold(FOLD_TT.disorder)}"><div class="kk">Predicted disorder</div><div class="vv">${iupredCell(iupredAt(v.resi)?.disorder)}<span class="muted" style="font-size:11px;margin-left:6px">0–1, higher = more</span></div></div>
+        <div class="ck" data-tt="${escFold(FOLD_TT.anchor2)}"><div class="kk">Disordered binding (ANCHOR2)</div><div class="vv">${iupredCell(iupredAt(v.resi)?.anchor2)}<span class="muted" style="font-size:11px;margin-left:6px">0–1, higher = more</span></div></div>
       </div>
       <div class="ctx-actions">
         ${v.consClass==='missense' && v.resi ? `<button class="btn" onclick="FOLD.panEffect('${v.id}')">${ICONS.effect||ICONS.star} PanEffect</button>` : ''}

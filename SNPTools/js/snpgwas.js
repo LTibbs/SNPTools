@@ -32,7 +32,7 @@
     chrCount:    10,
   };
   const FACETS = ['trait', 'traitCategory', 'population', 'publication'];
-  const FILTERED_SNPS_NOTE = 'Significant markers shown in red. Non-significant SNPs shown in blue, with dark and light blue alternating by chromosome. <br> NOTE: SNPs with raw p values above 0.001 (−log₁₀ P < 3) are not shown, to save memory.';
+  const FILTERED_SNPS_NOTE = 'NOTE: SNPs with raw p values above 0.001 (−log₁₀ P < 3) are not shown, to save memory.';
   /* the hard floor described above, as a number — a chosen threshold looser
      than this can't be honored since those rows were never in the file */
   const FLOOR_NEGLOG = 3;
@@ -628,6 +628,12 @@
     ctx.strokeStyle = '#c9d3e4';
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(plotLeft, plotBottom); ctx.lineTo(plotRight, plotBottom); ctx.stroke();
+
+    ctx.fillStyle = col.muted;
+    ctx.font = '10.5px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(FILTERED_SNPS_NOTE, (plotLeft + plotRight) / 2, plotBottom - 4);
   }
 
   /* ------------------------------------------------------------------ *
@@ -1050,12 +1056,8 @@
     }
     const startChr = chrsTouched[0] || chrForCum(cumMin);
     const endChr = chrsTouched[chrsTouched.length - 1] || chrForCum(cumMax);
-    /* cumMin/cumMax are pixel-derived, so the per-chromosome offsets come
-       out fractional. Snap to whole base pairs (widen outward so the sent
-       region still fully covers what was dragged) before anything stores
-       or hands them off — SNPVersity expects integer coordinates. */
-    const bpStart = Math.max(0, Math.floor(cumMin - GEOM.chrOffset[startChr]));
-    const bpEnd = Math.max(0, Math.ceil(cumMax - GEOM.chrOffset[endChr]));
+    const bpStart = Math.max(0, cumMin - GEOM.chrOffset[startChr]);
+    const bpEnd = Math.max(0, cumMax - GEOM.chrOffset[endChr]);
     const chrLabel = chrsTouched.length <= 1 ? ('Chr ' + startChr) : ('Chr ' + startChr + '–' + endChr);
     const coordLabel = chrsTouched.length <= 1
       ? ('Chr' + startChr + ':' + fmtBp(bpStart) + '–' + fmtBp(bpEnd))
@@ -1689,9 +1691,8 @@
     DOM.sendConfirmBtn.addEventListener('click', confirmSendToVersity);
     document.getElementById('gwxExportAllBtn').addEventListener('click', exportAllSignificant);
 
-    THRESH_BAR_SUFFIXES.forEach(wireThresholdBar);
+    wireThresholdBar();
     wireHelpPopover('gwxThreshHelpBtn', 'gwxThreshHelpPop');
-    wireHelpPopover('gwxThreshHelpBtnPanel', 'gwxThreshHelpPopPanel');
     wireHelpPopover('gwxRegionHelpBtn', 'gwxRegionHelpPop');
     wireHelpPopover('gwxIntroHelpBtn', 'gwxIntroHelpPop');
     wireGlobalOnce();
@@ -1702,54 +1703,38 @@
    *  Custom (a live alpha / method calculation). Only re-renders the    *
    *  plot + minimap + readout (and the region panel, if one is open)    *
    *  rather than the whole page, so pan/zoom/region state isn't lost.   *
-   *                                                                      *
-   *  Rendered twice — once above the plot, once inside the region panel *
-   *  (see thresholdBarHTML's suffix) — because the panel is a fixed,    *
-   *  full-viewport modal that covers the plot copy while a region is    *
-   *  open, which is exactly when a user most wants to change it. Both   *
-   *  copies drive the same threshSource/threshMethod/threshAlpha state  *
-   *  and are kept visually in sync by syncThresholdBarUI(), regardless  *
-   *  of which copy was actually clicked.                                *
    * ------------------------------------------------------------------ */
-  const THRESH_BAR_SUFFIXES = ['', 'Panel'];
-
-  function syncThresholdBarUI() {
-    const hasSimpleM = !!(activeEntry && activeEntry.effectiveMarkers);
-    const hasBonferroni = !!(activeEntry && activeEntry.totalMarkers);
-    THRESH_BAR_SUFFIXES.forEach(function (suffix) {
-      const published = document.getElementById('gwxThreshPublished' + suffix);
-      if (!published) return;
-      const custom = document.getElementById('gwxThreshCustom' + suffix);
-      const customControls = document.getElementById('gwxThreshCustomControls' + suffix);
-      const simpleM = document.getElementById('gwxThreshSimpleM' + suffix);
-      const bonferroni = document.getElementById('gwxThreshBonferroni' + suffix);
-      const alphaInput = document.getElementById('gwxAlphaInput' + suffix);
-      const readout = document.getElementById('gwxThreshReadout' + suffix);
-      published.classList.toggle('on', threshSource === 'published');
-      custom.classList.toggle('on', threshSource === 'custom');
-      customControls.style.display = threshSource === 'custom' ? 'flex' : 'none';
-      simpleM.classList.toggle('on', threshMethod === 'simplem');
-      simpleM.disabled = !hasSimpleM;
-      bonferroni.classList.toggle('on', threshMethod === 'bonferroni');
-      bonferroni.disabled = !hasBonferroni;
-      if (document.activeElement !== alphaInput) alphaInput.value = threshAlpha;
-      if (readout) readout.innerHTML = threshReadoutText();
-    });
-  }
-
-  function wireThresholdBar(suffix) {
-    suffix = suffix || '';
-    const published = document.getElementById('gwxThreshPublished' + suffix);
-    const custom = document.getElementById('gwxThreshCustom' + suffix);
-    const simpleM = document.getElementById('gwxThreshSimpleM' + suffix);
-    const bonferroni = document.getElementById('gwxThreshBonferroni' + suffix);
-    const alphaInput = document.getElementById('gwxAlphaInput' + suffix);
+  function wireThresholdBar() {
+    const published = document.getElementById('gwxThreshPublished');
+    const custom = document.getElementById('gwxThreshCustom');
+    const customControls = document.getElementById('gwxThreshCustomControls');
+    const simpleM = document.getElementById('gwxThreshSimpleM');
+    const bonferroni = document.getElementById('gwxThreshBonferroni');
+    const alphaInput = document.getElementById('gwxAlphaInput');
     if (!published) return;
 
-    published.addEventListener('click', function () { threshSource = 'published'; onThresholdChange(); });
-    custom.addEventListener('click', function () { threshSource = 'custom'; onThresholdChange(); });
-    simpleM.addEventListener('click', function () { if (simpleM.disabled) return; threshMethod = 'simplem'; onThresholdChange(); });
-    bonferroni.addEventListener('click', function () { if (bonferroni.disabled) return; threshMethod = 'bonferroni'; onThresholdChange(); });
+    function setSource(src) {
+      threshSource = src;
+      published.classList.toggle('on', src === 'published');
+      custom.classList.toggle('on', src === 'custom');
+      customControls.style.display = src === 'custom' ? 'flex' : 'none';
+      onThresholdChange();
+    }
+    published.addEventListener('click', function () { setSource('published'); });
+    custom.addEventListener('click', function () { setSource('custom'); });
+
+    simpleM.addEventListener('click', function () {
+      if (simpleM.disabled) return;
+      threshMethod = 'simplem';
+      simpleM.classList.add('on'); bonferroni.classList.remove('on');
+      onThresholdChange();
+    });
+    bonferroni.addEventListener('click', function () {
+      if (bonferroni.disabled) return;
+      threshMethod = 'bonferroni';
+      bonferroni.classList.add('on'); simpleM.classList.remove('on');
+      onThresholdChange();
+    });
 
     function commitAlpha() {
       const v = parseFloat(alphaInput.value);
@@ -1764,6 +1749,18 @@
   function resetThresholdSource() {
     if (threshSource === 'published' && threshMethod === 'simplem' && threshAlpha === 0.05) return;
     threshSource = 'published'; threshMethod = 'simplem'; threshAlpha = 0.05;
+    const published = document.getElementById('gwxThreshPublished');
+    const custom = document.getElementById('gwxThreshCustom');
+    const customControls = document.getElementById('gwxThreshCustomControls');
+    const simpleM = document.getElementById('gwxThreshSimpleM');
+    const bonferroni = document.getElementById('gwxThreshBonferroni');
+    const alphaInput = document.getElementById('gwxAlphaInput');
+    if (published) published.classList.add('on');
+    if (custom) custom.classList.remove('on');
+    if (customControls) customControls.style.display = 'none';
+    if (simpleM) simpleM.classList.add('on');
+    if (bonferroni) bonferroni.classList.remove('on');
+    if (alphaInput) alphaInput.value = threshAlpha;
     onThresholdChange();
   }
 
@@ -1771,7 +1768,8 @@
     recomputeThreshold();
     renderPlot();
     renderMinimap();
-    syncThresholdBarUI();
+    const readout = document.getElementById('gwxThreshReadout');
+    if (readout) readout.innerHTML = threshReadoutText();
     if (currentRegion) renderRegionPanel();
   }
 
@@ -2087,33 +2085,26 @@
   const INTRO_DEF_TERMS = ['Trait', 'Measure: Trait value (intercept)', 'Measure: Linear plasticity (slope)', 'GWAS method', 'Total markers', 'Significant markers', 'Published significance threshold'];
   const EXPORT_THRESH_DEF_TERMS = ['Published significance threshold', 'Custom threshold', 'SimpleM', 'Bonferroni', 'α (alpha)'];
 
-  /* suffix lets the exact same control render twice with non-colliding
-     ids — once above the plot, once inside the region panel (see
-     THRESH_BAR_SUFFIXES) — because the panel is a fixed, full-viewport
-     modal that sits on top of the plot copy and swallows its clicks
-     while a region is selected, which is precisely when a user most
-     wants to try a different threshold against the table. */
-  function thresholdBarHTML(suffix) {
-    suffix = suffix || '';
+  function thresholdBarHTML() {
     const hasSimpleM = !!activeEntry.effectiveMarkers;
     const hasBonferroni = !!activeEntry.totalMarkers;
     return '<div class="card gwx-thresh-bar">' +
       '<span class="gwx-thresh-label">Display significance threshold: </span>' +
-      defPopoverHTML('gwxThreshHelpBtn' + suffix, 'gwxThreshHelpPop' + suffix, 'Significance threshold help', THRESH_DEF_TERMS) +
+      defPopoverHTML('gwxThreshHelpBtn', 'gwxThreshHelpPop', 'Significance threshold help', THRESH_DEF_TERMS) +
       '<div class="gwx-seg" role="group" aria-label="Threshold source">' +
-        '<button id="gwxThreshPublished' + suffix + '" class="' + (threshSource === 'published' ? 'on' : '') + '" type="button">Published</button>' +
-        '<button id="gwxThreshCustom' + suffix + '" class="' + (threshSource === 'custom' ? 'on' : '') + '" type="button">Custom</button>' +
+        '<button id="gwxThreshPublished" class="' + (threshSource === 'published' ? 'on' : '') + '" type="button">Published</button>' +
+        '<button id="gwxThreshCustom" class="' + (threshSource === 'custom' ? 'on' : '') + '" type="button">Custom</button>' +
       '</div>' +
-      '<div class="gwx-thresh-custom" id="gwxThreshCustomControls' + suffix + '" style="display:' + (threshSource === 'custom' ? 'flex' : 'none') + '">' +
+      '<div class="gwx-thresh-custom" id="gwxThreshCustomControls" style="display:' + (threshSource === 'custom' ? 'flex' : 'none') + '">' +
         '<div class="gwx-seg" role="group" aria-label="Threshold method">' +
-          '<button id="gwxThreshSimpleM' + suffix + '" class="' + (threshMethod === 'simplem' ? 'on' : '') + '" type="button"' +
+          '<button id="gwxThreshSimpleM" class="' + (threshMethod === 'simplem' ? 'on' : '') + '" type="button"' +
             (hasSimpleM ? '' : ' disabled title="No effective marker count available for this dataset"') + '>SimpleM</button>' +
-          '<button id="gwxThreshBonferroni' + suffix + '" class="' + (threshMethod === 'bonferroni' ? 'on' : '') + '" type="button"' +
+          '<button id="gwxThreshBonferroni" class="' + (threshMethod === 'bonferroni' ? 'on' : '') + '" type="button"' +
             (hasBonferroni ? '' : ' disabled title="No marker count available for this dataset"') + '>Bonferroni</button>' +
         '</div>' +
-        '<label class="gwx-thresh-alpha">&alpha; <input type="text" id="gwxAlphaInput' + suffix + '" value="' + escAttr(threshAlpha) + '" inputmode="decimal" /></label>' +
+        '<label class="gwx-thresh-alpha">&alpha; <input type="text" id="gwxAlphaInput" value="' + escAttr(threshAlpha) + '" inputmode="decimal" /></label>' +
       '</div>' +
-      '<span class="gwx-thresh-readout" id="gwxThreshReadout' + suffix + '">' + threshReadoutText() + '</span>' +
+      '<span class="gwx-thresh-readout" id="gwxThreshReadout">' + threshReadoutText() + '</span>' +
     '</div>';
   }
 
@@ -2164,7 +2155,6 @@
         '<div class="gwx-sel-label" id="gwxSelLabelEnd"></div>' +
         '<div class="gwx-tooltip" id="gwxTooltip"></div>' +
       '</div>' +
-      '<p class="gwx-plot-legend">' + FILTERED_SNPS_NOTE + '</p>' +
       '<div class="card gwx-minimap-wrap">' +
         '<p class="gwx-minimap-label">Genome overview</p>' +
         '<canvas id="gwxMinimap"></canvas>' +
@@ -2187,7 +2177,6 @@
           '</div>' +
         '</div>' +
       '</div>' +
-      '<div class="gwx-panel-thresh">' + thresholdBarHTML('Panel') + '</div>' +
       '<div class="gwx-panel-controls">' +
         '<div style="display:flex;align-items:center;gap:8px">' +
           '<div class="gwx-seg" role="group" aria-label="Filter">' +
@@ -2316,7 +2305,6 @@
     '.gwx-tooltip .row{display:flex;justify-content:space-between;gap:14px;color:var(--muted);white-space:nowrap}' +
     '.gwx-tooltip .row b{font-family:var(--mono);color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}' +
     '.gwx-sig-badge{display:inline-block;margin-top:4px;font-size:10.5px;font-weight:700;padding:1px 7px;border-radius:20px;background:#c0392b;color:#fff}' +
-    '.gwx-plot-legend{margin:8px 2px 0;font-size:10.5px;line-height:1.5;color:var(--muted);text-align:center}' +
     '.gwx-minimap-wrap{margin-top:14px;padding:10px 12px 12px}' +
     '.gwx-minimap-label{font-size:10.5px;color:var(--faint);text-transform:uppercase;letter-spacing:.06em;margin:0 0 6px;font-weight:700}' +
     '#gwxMinimap{display:block;width:100%;height:54px;cursor:pointer;border-radius:var(--rad-sm)}' +
@@ -2348,8 +2336,6 @@
     '.gwx-stat .v{font-family:var(--mono);font-size:18px;font-weight:700;color:var(--navy-700)}' +
     '.gwx-stat.sig .v{color:#c0392b}' +
     '.gwx-stat .k{font-size:10.5px;color:var(--faint);text-transform:uppercase;letter-spacing:.05em;font-weight:600}' +
-    '.gwx-panel-thresh{padding:12px 18px 0}' +
-    '.gwx-panel-thresh .gwx-thresh-bar{margin-top:0;padding:9px 12px}' +
     '.gwx-panel-controls{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 18px;border-bottom:1px solid var(--line)}' +
     '.gwx-panel-table-wrap{flex:1 1 auto;min-height:220px;overflow:auto;padding:0 0 8px}' +
     '.gwx-panel-head,.gwx-panel-controls,.gwx-panel-foot{flex:0 0 auto}' +
