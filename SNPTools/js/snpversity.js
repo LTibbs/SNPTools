@@ -113,7 +113,7 @@ function applyPendingRequest(){
   if(req.chr){ S.chr=String(req.chr).startsWith('chr')?req.chr:'chr'+req.chr; }
   const flank=+req.flank||0;
   if(req.start!=null && req.end!=null){
-    const lo=Math.min(+req.start,+req.end), hi=Math.max(+req.start,+req.end);
+    const lo=Math.floor(Math.min(+req.start,+req.end)), hi=Math.ceil(Math.max(+req.start,+req.end));
     S.start=Math.max(0,lo-flank); S.end=hi+flank;
   }
 
