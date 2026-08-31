@@ -24,11 +24,12 @@ const ICONS = {
   download:'<svg viewBox="0 0 24 24" fill="none"><path d="M12 4v10m0 0l-4-4m4 4l4-4M5 19h14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   table:'<svg viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="16" rx="2" stroke="currentColor" stroke-width="1.8"/><path d="M3 9h18M9 9v11" stroke="currentColor" stroke-width="1.6"/></svg>',
   effect:'<svg viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="16" rx="2" stroke="currentColor" stroke-width="1.7"/><path d="M8 4v16M13 4v16M3 9h18M3 14h18" stroke="currentColor" stroke-width="1.2" opacity=".6"/></svg>',
+  gwas:'<svg viewBox="0 0 24 24" fill="none"><path d="M3 20h18" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M3 9h18" stroke="currentColor" stroke-width="1.2" stroke-dasharray="2 2" opacity=".55"/><circle cx="6" cy="16" r="1.3" fill="currentColor"/><circle cx="9" cy="13" r="1.3" fill="currentColor"/><circle cx="12" cy="6" r="1.6" fill="currentColor"/><circle cx="15" cy="14" r="1.3" fill="currentColor"/><circle cx="18" cy="10" r="1.3" fill="currentColor"/></svg>',
 };
 
 /* ================= TOOL REGISTRY ================= */
 const GROUPS = [
-  {label:'Visualization & Search', tools:['snpversity','snptrait']},
+  {label:'Visualization & Search', tools:['snpversity','snpgwas','snptrait']},
   {label:'Explore & Analyze', tools:['snpimpact','snpfunction', 'snpfold']},
   {label:'Compare & Relate', tools:['snpcompare','snptree']},
   {label:'External plugin', tools:['paneffect']},
@@ -36,6 +37,10 @@ const GROUPS = [
   //{label:'Collection', tools:['snpgermplasm']},
 ];
 const TOOLS = {
+  snpgwas:{name:'GWAS Explorer', icon:'gwas', color:'#cf8a12', cat:'Visualization & Search',
+    tag:'Scan the genome for trait-associated SNPs',
+    desc:'Genome-wide Manhattan plot for NAM GWAS results — pan and zoom across all 10 chromosomes, search by SNP ID, and drag-select a peak to inspect its variants. Hand a selected region straight off to SNPVersity to keep exploring.',
+    feats:[['gwas','Genome-wide scan','Canvas Manhattan plot across all NAM chromosomes.'],['search','Select a region','Drag a peak to list and filter its SNPs.'],['compare','Hand off region','Send the selected interval to SNPVersity.']]},
   snpversity:{name:'SNPVersity', icon:'dna', color:'#2563eb', cat:'Visualization & Search',
     tag:'Explore variation across lines and populations',
     desc:'Explore extensive variant datasets across maize accessions. Enter a genomic interval, choose accessions, and get a color-coded table plus a downloadable VCF — with allele states, effect annotations, and DNA/protein language-model scores.'},
@@ -121,7 +126,7 @@ function renderNav(){
       <div class="gl">${g.label}</div>
       ${g.tools.map(id=>{
         const t=TOOLS[id]; const active=id===S.tool?'active':'';
-        const _bl={snpversity:'updated',snptree:'new',snpcompare:'new',snpimpact:'new',snpfold:'new',snpfunction:'new',snpmatrix:'new',paneffect:'new'}[id]||'soon';
+        const _bl={snpgwas:'new',snpversity:'updated',snptree:'new',snpcompare:'new',snpimpact:'new',snpfold:'new',snpfunction:'new',snpmatrix:'new',paneffect:'new'}[id]||'soon';
         const _bc={new:'#1f8a4c',demo:'#2563eb',soon:'#c0362c'}[_bl];
         const soon=`<span class="soon" style="color:${_bc};border-color:${_bc}">${_bl}</span>`;
         return `<button class="navitem ${active}" onclick="go('${id}')">
