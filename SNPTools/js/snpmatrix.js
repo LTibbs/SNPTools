@@ -11,16 +11,11 @@
  * ===================================================================== */
 const SNPMatrix = (function () {
 
-  const MAXN = 400;
   const ST = { input:null, order:'input', value:'distance', bars:true, force:false, built:null, _sig:null };
 
-  /* ---- IBS distance from the genotype matrix ---- */
-  function dosage(gt){
-    if (gt==null) return null;
-    if (gt==='0/0') return 0; if (gt==='1/1') return 2;
-    if (gt==='./.'||gt==='.'||gt==='') return null;
-    return 1;                                   // het
-  }
+  /* ---- IBS distance from the genotype matrix ----
+     gts entries are 1-byte codes from Data.parseVcf: 0/1/2 = dosage, 3 = missing. */
+  function dosage(gt){ return (gt == null || gt === 3) ? null : gt; }
   function ibsMatrix(rows, n){
     const M = Array.from({length:n}, () => new Float64Array(n));
     const C = Array.from({length:n}, () => new Float64Array(n));
@@ -65,7 +60,7 @@ const SNPMatrix = (function () {
     injectCSS();
     const crumb=document.getElementById('crumbTool'); if(crumb) crumb.innerHTML='<b>SNPMatrix</b>';
     const page=document.getElementById('page');
-    if (S.matrixInput) ST.input = S.matrixInput;
+    if (S.matrixInput && S.matrixInput !== ST.input){ ST.input = S.matrixInput; ST.force = false; }
     else if (!ST.input && S.treeInput) ST.input = S.treeInput;
     const inp = ST.input;
     page.className='page fade';
@@ -122,8 +117,15 @@ const SNPMatrix = (function () {
 
   function stageInner(inp){
     const n = inp.accs.length;
-    if (n>MAXN && !ST.force){
-      return `<div class="mtx-note">You selected <b>${n}</b> accessions. Building an ${n}×${n} matrix (≈${(n*n/1e3).toFixed(0)}k cells) can be slow in the browser.
+    const V = (inp.rows && inp.rows.length) || 0;
+    if (ibsWork(V,n) > IBS_COST.workBlock){
+      return `<div class="mtx-note">Selected data too large for SNPMatrix - choose a smaller region, a lower-density SNP set, or fewer accessions, then re-run in SNPVersity.</div>`;
+    }
+    if ((n > IBS_COST.mtxAccWarn || ibsWork(V,n) > IBS_COST.workWarn) && !ST.force){
+      const bits = [];
+      if (n > IBS_COST.mtxAccWarn) bits.push(`a ${n}×${n} heatmap is ${(n*n).toLocaleString()} cells — slow to draw and hard to read`);
+      if (ibsWork(V,n) > IBS_COST.workWarn) bits.push(`the distance matrix will make the page unresponsive for roughly ${ibsSeconds(V,n)}s`);
+      return `<div class="mtx-note"><b>${n}</b> accessions × <b>${V.toLocaleString()}</b> variants — ${bits.join('; ')}.
         <button class="btn" style="margin-left:8px" onclick="SNPMatrix.force()">Build anyway</button></div>`;
     }
     const b = build(inp);

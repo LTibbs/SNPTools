@@ -183,6 +183,34 @@ function renderToolPage(id){
 }
 
 
+/* ================= IBS COST MODEL =================
+   Work is measured in (variants × accessions²). Two per-unit rates, calibrated
+   2026-09 against real parsed results:
+     SNPTree / SNPMatrix distance matrix : ~4.5 ns/unit
+     SNPCompare (region) all-pairs       : ~1.2 ns/unit  (~3.8x cheaper)
+   Used to (a) warn in each tool before a long synchronous compute and (b) grey
+   out the SNPVersity send buttons when a query would essentially kill the tab.
+   SNPImpact never touches genotypes, so it scales on variant count alone. */
+const IBS_COST = {
+  // SNPTree / SNPMatrix (≈4.5 ns/unit)
+  workWarn:    2e9,      // ≈ 9 s  -> tool shows a "build anyway" notice
+  workBlock:   1.5e10,   // ≈ 65 s -> SNPVersity greys the send button
+  // SNPCompare region all-pairs (≈1.2 ns/unit)
+  cmpWorkWarn: 7.5e9,    // ≈ 9 s
+  cmpWorkBlock: 5e10,    // ≈ 60 s
+  cmpMemWarn:  1.5e8,    // variants × accessions bytes ≈ 150 MB genotype matrix
+  cmpMemBlock: 3e8,      //                             ≈ 300 MB
+  // SNPMatrix render
+  mtxAccWarn:  450,      // an A×A SVG heatmap past here is slow to draw and hard to read
+  // SNPImpact (variant count only)
+  impactSoft:  600000,   // ranking starts to lag
+  impactBlock: 2000000,  // too many to rank in the browser
+};
+function ibsWork(v, a){ return v * a * a; }
+function ibsSeconds(v, a){ return Math.round(4.5e-9 * v * a * a); }   // SNPTree / SNPMatrix
+function cmpSeconds(v, a){ return Math.round(1.2e-9 * v * a * a); }   // SNPCompare region
+
+
 /* ================= TOOLTIPS ================= */
 const tt=document.getElementById('tt');
 function attachTT(){

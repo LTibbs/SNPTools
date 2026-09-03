@@ -10,6 +10,12 @@
 
 header('Content-Type: application/json');
 
+/* Building a VCF for a wide region / large accession set legitimately takes
+ * more than PHP's default 30 s max_execution_time (which on Windows counts
+ * the blocking shell_exec below as wall-clock). Lift it so the request runs
+ * to completion instead of dying with a Fatal error mid-stream. */
+set_time_limit(0);
+
 /* ---------------------------------------------------------------------
  *  CONFIG — provided by the environment; no machine paths committed to git
  * ------------------------------------------------------------------- */
@@ -96,8 +102,13 @@ if (!is_writable($VCF_DIR)) {
         'message' => 'VCF directory is not writable: ' . $VCF_DIR));
     exit;
 }
-$base = basename($outName ? $outName : ('snpv_' . time() . '_' . mt_rand() . '.vcf'));
-if (substr($base, -4) !== '.vcf') { $base .= '.vcf'; }
+/* Output is gzip-compressed (.vcf.gz) — genotype text compresses ~15-20x.
+ * h5_to_vcf.py writes gzip transparently when the path ends in .gz, and
+ * data.js inflates the response with DecompressionStream. */
+$base = basename($outName ? $outName : ('snpv_' . time() . '_' . mt_rand() . '.vcf.gz'));
+if (substr($base, -7) !== '.vcf.gz') {
+    $base = preg_replace('/\.vcf(\.gz)?$/', '', $base) . '.vcf.gz';
+}
 $vcf_path = rtrim($VCF_DIR, '/') . '/' . $base;
 
 /* ---------------------------------------------------------------------
@@ -105,27 +116,41 @@ $vcf_path = rtrim($VCF_DIR, '/') . '/' . $base;
  * ------------------------------------------------------------------- */
 $genotypesArray = json_decode($genotypesJson);
 if (!is_array($genotypesArray)) { $genotypesArray = array(); }
-$jsonArray = escapeshellarg(json_encode(array_values($genotypesArray)));
+
+/* The accession list is handed to Python through a sidecar JSON file, not
+ * as a command-line argument. Windows' escapeshellarg() strips '"' (and
+ * '%', '!') from arguments, which shreds a JSON array on the command line;
+ * a file sidesteps shell quoting entirely and behaves the same on every
+ * OS. h5_to_vcf.py's 5th arg is now that file's path. */
+$acc_path = $vcf_path . '.acc.json';
+file_put_contents($acc_path, json_encode(array_values($genotypesArray)));
 
 /* ---------------------------------------------------------------------
- *  RUN  h5_to_vcf.py  <db> <out.vcf> <start> <end> <genotypesJson>
+ *  RUN  h5_to_vcf.py  <db> <out.vcf> <start> <end> <accessions.json>
  * ------------------------------------------------------------------- */
 $command = escapeshellarg($PYTHON_PATH) . ' ' . escapeshellarg('h5_to_vcf.py') . ' '
          . escapeshellarg($db_filename) . ' '
          . escapeshellarg($vcf_path)    . ' '
          . escapeshellarg($start)       . ' '
          . escapeshellarg($end)         . ' '
-         . $jsonArray . ' 2>&1';
+         . escapeshellarg($acc_path)    . ' 2>&1';
 
 $output = shell_exec($command);
 
+@unlink($acc_path);
+
 // The script writes the VCF as a side effect; success = the file now exists.
 if (is_file($vcf_path)) {
+    $variants = null;
+    if ($output !== null && preg_match('/^variants:\s*(\d+)/m', $output, $mm)) {
+        $variants = (int) $mm[1];
+    }
     echo json_encode(array(
-        'status'  => 'success',
-        'outFile' => $vcf_path,
-        'message' => 'VCF written',
-        'output'  => $output,
+        'status'   => 'success',
+        'outFile'  => $vcf_path,
+        'variants' => $variants,   // exact site count — lets the client size the result before parsing
+        'message'  => 'VCF written',
+        'output'   => $output,
     ));
 } else if ($output !== null && strpos($output, 'No data found in the specified position range') !== false) {
     // Python ran fine, the interval simply contained no variants.

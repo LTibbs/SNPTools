@@ -97,6 +97,10 @@ button{font-family:inherit}
 .btn.ghost{background:transparent;border-color:transparent;color:var(--muted)}
 .btn.ghost:hover{background:#eef2f8;color:var(--ink)}
 .btn[disabled]{opacity:.5;cursor:not-allowed}
+/* greyed-out but still hoverable (keeps its title tooltip); the click is a
+   no-op in JS. Used e.g. for the Pangenome viewer button on a wide region. */
+.btn.off{opacity:.5;cursor:not-allowed;pointer-events:auto}
+.btn.off:hover{border-color:var(--line);background:var(--white)}
 .menu{
   position:absolute;right:0;top:46px;background:#fff;border:1px solid var(--line);border-radius:12px;
   box-shadow:var(--shadow-lg);padding:6px;min-width:300px;display:none;z-index:50;
@@ -319,6 +323,7 @@ table.vcf tbody tr:hover td{background:#f8faff}
 
 /* loading + empty */
 .loading{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:70px 20px;gap:16px;color:var(--muted)}
+.load-hint{font-size:12px;max-width:440px;text-align:center;line-height:1.55;color:var(--faint)}
 .spinner{width:38px;height:38px;border:3px solid var(--line);border-top-color:var(--blue);border-radius:50%;animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 .empty-state{text-align:center;padding:64px 20px;color:var(--muted)}

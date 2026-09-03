@@ -15,19 +15,11 @@
  * ===================================================================== */
 const SNPTree = (function () {
 
-  const MAXN = 250;   // O(n^3) tree building; above this we warn before running
-
   /* ------------------------------------------------------------------ *
    *  1. IBS distance from the genotype matrix
    * ------------------------------------------------------------------ */
-  // biallelic dosage: 0/0->0, het->1, 1/1->2, missing->null
-  function dosage(gt){
-    if (gt == null) return null;
-    if (gt === '0/0') return 0;
-    if (gt === '1/1') return 2;
-    if (gt === './.' || gt === '.' || gt === '') return null;
-    return 1; // 0/1, 1/0
-  }
+  // gts entries are 1-byte codes from Data.parseVcf: 0/1/2 = dosage, 3 = missing.
+  function dosage(gt){ return (gt == null || gt === 3) ? null : gt; }
 
   // rows: [{gts:[...n]}], returns {M:n×n mean allele-difference, C:n×n shared-site counts, sites, informative}
   function ibsMatrix(rows, n){
@@ -195,6 +187,7 @@ const SNPTree = (function () {
     injectCSS();
     const crumb=document.getElementById('crumbTool'); if(crumb) crumb.innerHTML='<b>SNPTree</b>';
     const inp = S.treeInput || ST.input;
+    if (inp !== ST.input) ST.force = false;
     ST.input = inp;
     if (!inp || !inp.rows || !inp.rows.length){
       page.innerHTML = emptyState();
@@ -315,9 +308,14 @@ const SNPTree = (function () {
     const stage=document.getElementById('treeStage');
     const meta=document.getElementById('treeMeta');
     if (n<3){ stage.innerHTML=notice('Need at least 3 accessions to build a tree. Select more in SNPVersity.'); meta.innerHTML=''; return; }
-    if (n>MAXN && !ST.force){
+    const V = (inp.rows && inp.rows.length) || 0;
+    if (ibsWork(V,n) > IBS_COST.workBlock){
+      stage.innerHTML = notice('Selected data too large for SNPTree - choose a smaller region, a lower-density SNP set, or fewer accessions, then re-run in SNPVersity.');
+      meta.innerHTML=''; return;
+    }
+    if (ibsWork(V,n) > IBS_COST.workWarn && !ST.force){
       stage.innerHTML = notice(
-        `You selected <b>${n}</b> accessions. Tree building scales steeply (≈n³); above ${MAXN} it can be slow.`+
+        `<b>${n}</b> accessions × <b>${V.toLocaleString()}</b> variants. Computing the distance matrix and drawing the tree will make the page unresponsive for roughly ${ibsSeconds(V,n)}s.`+
         `<br><br><button class="btn" onclick="SNPTree.forceBuild()">Build anyway</button>`);
       meta.innerHTML=''; return;
     }

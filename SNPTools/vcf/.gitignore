@@ -1,0 +1,4 @@
+# VCFs written at runtime by processForm.php / h5_to_vcf.py. Transient
+# output — never committed.
+*
+!.gitignore

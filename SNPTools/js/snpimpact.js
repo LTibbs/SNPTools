@@ -14,6 +14,7 @@
     fCons: 'all', fImpact: 'all', fScore: 'all', fDomain: 'all',
     openId: null,
     shortlist: new Set(),
+    force: false,          // "Rank anyway" past the variant-count guard
   };
   const CAP = 1500;                          // max rows rendered at once
   const PRIO_RANK = { TOP:0, HIGH:1, MODERATE:2, LOW:3 };
@@ -159,7 +160,13 @@
     return 'vm';
   }
 
+  /* Cache the filter+sort pass (O(rows log rows)) so re-renders that don't
+     touch the filters or sort — expanding a detail row, starring a variant —
+     don't re-scan every variant. Keyed on the region + all filter/sort state. */
+  let _fCache = null;
   function filtered(){
+    const key = [IMP._sig, IMP.fCons, IMP.fImpact, IMP.fScore, IMP.fDomain, IMP.sortKey, IMP.sortDir].join('|');
+    if (_fCache && _fCache.key === key) return _fCache.rows;
     let r = IMP.rows.filter(v =>
       (IMP.fCons==='all'   || v.consClass===IMP.fCons) &&
       (IMP.fImpact==='all' || v.priority===IMP.fImpact) &&
@@ -180,6 +187,7 @@
       if (na&&nb) return 0; if (na) return 1; if (nb) return -1;
       return dir*(av-bv);
     });
+    _fCache = { key, rows: r };
     return r;
   }
 
@@ -210,6 +218,17 @@
     if (!input || !input.rows || !input.rows.length){ page.innerHTML = emptyState(); return; }
 
     const sig = `${input.chr}:${input.start}-${input.end}:${input.dataset}:${input.rows.length}`;
+    if (IMP._sig !== sig) IMP.force = false;
+    const V = input.rows.length;
+    if (V > IBS_COST.impactBlock && !IMP.force){
+      page.innerHTML = `<div class="empty-state"><div class="ei">${ICONS.star||''}</div>
+        <h3>Selected data too large for SNPImpact</h3>
+        <p>This region has <b>${V.toLocaleString()}</b> variants. Choose a smaller region or a
+        lower-density SNP set in SNPVersity, then re-run — or rank it anyway (it may lag).</p>
+        <button class="btn solid" onclick="go('snpversity')">Go to SNPVersity</button>
+        <button class="btn" style="margin-left:8px" onclick="IMPACT.forceRank()">Rank anyway</button></div>`;
+      return;
+    }
     if (IMP._sig !== sig){
       IMP.rows = Data.rankImpact(input.rows);
       IMP._sig = sig; IMP.input = input; IMP.openId = null; IMP.shortlist.clear();
@@ -233,7 +252,7 @@
       </div></div>
 
       <div class="imp-context">
-        <span><b>${IMP.rows.length.toLocaleString()}</b> variants in region</span>
+        <span><b>${IMP.rows.length.toLocaleString()}</b> variants in region${IMP.rows.length > IBS_COST.impactSoft ? ' <span style="color:var(--muted)">— ranking a set this large may take a few seconds</span>' : ''}</span>
         <span class="dot">·</span><span><b>${top.toLocaleString()}</b> high-priority</span>
         <span class="dot">·</span><span>region <span class="mono">${region}</span></span>
         <span class="dot">·</span><span><span class="mono">${esc(input.datasetName||input.dataset)}</span></span>
@@ -548,6 +567,7 @@
 
   /* ---------- public handlers ---------- */
   window.IMPACT = {
+    forceRank(){ IMP.force = true; render(); },
     setFilter(k,v){ IMP[k]=v; render(); },
     sort(k){ if(IMP.sortKey===k) IMP.sortDir*=-1;
       else { IMP.sortKey=k; IMP.sortDir = (k==='gene'||k==='consequence'||k==='domain')?1:1; } render(); },

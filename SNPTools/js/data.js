@@ -32,9 +32,11 @@ const Data = (function () {
     domainsUrl : 'data/domains/domains.by_chr.json',  // combined file (fallback if per-chrom absent)
     domainsGeneUrl : 'data/domains/domains.by_gene.json',  // gene -> canonical protein domains (SNPImpact detail)
     geneModelsDir : 'data/genemodels/by_chr/',        // per-chromosome exon/CDS structure (SNPImpact gene model)
-    // Regions wider than this fall back to a download link instead of a
-    // full in-browser table (mirrors the original app's behavior).
-    tableMaxSpan : 1_000_000,
+    // Hard span backstop — a region wider than this is download-only regardless
+    // of how few accessions are selected. The real gate is the variants ×
+    // accessions "table work" budget below (TABLE_WORK_MAX / TABLE_ROWS_MAX);
+    // this just catches an absurd region.
+    tableMaxSpan : 20_000_000,
   };
 
   /* ---------------- datasets (UI cards) ----------------
@@ -206,13 +208,38 @@ const Data = (function () {
   function uniqueOutName(lo, hi){
     const ts = Date.now();
     const rnd = Math.random().toString().slice(2, 11);
-    return `${CFG.vcfDir}snpv_${ts}_${rnd}_${lo}_${hi}.vcf`;
+    return `${CFG.vcfDir}snpv_${ts}_${rnd}_${lo}_${hi}.vcf.gz`;
   }
 
-  // Pull one INFO tag out of the INFO column (values are ';'-separated).
-  function info(infoStr, key){
-    const m = infoStr.match(new RegExp('(?:^|;)' + key + '=([^;\\t]*)'));
-    return m ? m[1] : null;
+  /* processForm.php returns a gzip-compressed VCF (.vcf.gz). Inflate it in
+     the browser; fall back to treating the bytes as plain text if they are
+     not gzip-framed (a proxy that already decompressed, or a plain .vcf
+     from some other caller). */
+  async function readVcfResponse(resp){
+    const buf = new Uint8Array(await resp.arrayBuffer());
+    const gzipped = buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b;
+    if (gzipped && typeof DecompressionStream === 'function'){
+      const stream = new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'));
+      return await new Response(stream).text();
+    }
+    return new TextDecoder().decode(buf);
+  }
+
+  /* Parse the whole INFO column (';'-separated key=value tags) once per row
+     into a plain object. This replaced ~20 calls/row to a helper that
+     compiled a fresh RegExp each time — millions of compilations for a wide
+     region. A missing key reads back as undefined, which numOrNull /
+     firstNum / cleanTok already treat the same as null. */
+  function parseInfo(infoStr){
+    const o = {};
+    if (!infoStr) return o;
+    const parts = infoStr.split(';');
+    for (let i = 0; i < parts.length; i++){
+      const p = parts[i];
+      const eq = p.indexOf('=');
+      if (eq === -1) o[p] = ''; else o[p.slice(0, eq)] = p.slice(eq + 1);
+    }
+    return o;
   }
   const cleanTok = s => {
     if (s == null) return '';
@@ -229,59 +256,94 @@ const Data = (function () {
     return numOrNull(String(v).split(/[;,]+/)[0]);
   }
 
+  /* A region's genotype matrix is variants × accessions — by far the biggest
+     thing in memory. Store each call as a 1-byte code in an Int8Array rather
+     than a string:  0 = ref/ref, 1 = het, 2 = alt/alt, 3 = missing (null).
+     ~8x smaller than an Array of strings, and the downstream dosage() calls
+     become the identity. GT_CODE is the fast path — a direct lookup on the
+     raw VCF cell, no allocation. */
+  const GT_CODE = Object.create(null);
+  GT_CODE['0/0'] = 0; GT_CODE['0|0'] = 0;
+  GT_CODE['1/0'] = 1; GT_CODE['0/1'] = 1; GT_CODE['1|0'] = 1; GT_CODE['0|1'] = 1;
+  GT_CODE['1/1'] = 2; GT_CODE['1|1'] = 2;
+  GT_CODE['./.'] = 3; GT_CODE['.|.'] = 3; GT_CODE['.'] = 3;
+  function gtCode(cell){
+    if (cell == null) return 3;
+    const q = GT_CODE[cell];
+    if (q !== undefined) return q;
+    // rare: FORMAT subfields (0/1:...) or non-0/1 allele indices
+    let s = cell;
+    const c = s.indexOf(':'); if (c !== -1) s = s.slice(0, c);
+    const q2 = GT_CODE[s]; if (q2 !== undefined) return q2;
+    const m = s.split(/[/|]/);
+    if (m.length < 2 || m[0] === '.' || m[1] === '.' || m[0] === '' || m[1] === '') return 3;
+    return (m[0] !== '0' ? 1 : 0) + (m[1] !== '0' ? 1 : 0);
+  }
+
   function parseVcf(text, ids){
     const rows = [];
     if (!text) return {rows, sampleCols:{}, header:[]};
-    const lines = text.split(/\r?\n/);
-    let sampleCols = {};        // sampleName -> column index in the row
-    for (const line of lines){
-      if (!line) continue;
-      if (line.startsWith('##')) continue;
-      if (line.startsWith('#CHROM') || line.startsWith('#')){
-        const cols = line.replace(/^#/, '').split('\t');
-        for (let i = 9; i < cols.length; i++) sampleCols[cols[i]] = i;
-        continue;
+    const sampleCols = {};      // sampleName -> column index in the row
+    const nIds = ids.length;
+    const N = text.length;
+    /* Walk lines by index rather than text.split('\n') — the split would
+       hold a second full copy of the payload as an array of line strings. */
+    let p = 0;
+    while (p < N){
+      let nl = text.indexOf('\n', p);
+      if (nl === -1) nl = N;
+      let end = nl;
+      if (end > p && text.charCodeAt(end - 1) === 13) end--;   // strip trailing \r
+      if (end === p){ p = nl + 1; continue; }                  // blank line
+      if (text.charCodeAt(p) === 35){                          // '#'
+        if (text.charCodeAt(p + 1) !== 35){                    // '#CHROM' header row, not '##meta'
+          const cols = text.slice(p + 1, end).split('\t');
+          for (let i = 9; i < cols.length; i++) sampleCols[cols[i]] = i;
+        }
+        p = nl + 1; continue;
       }
-      const t = line.split('\t');
+      const t = text.slice(p, end).split('\t');
+      p = nl + 1;
       if (t.length < 8) continue;
-      const infoStr = t[7] || '';
+      const II = parseInfo(t[7] || '');
 
       // impact: take the most severe when a site lists several
       let impact = 'MODIFIER';
-      const effTokens = (info(infoStr, 'EFFECT') || '').split(/[;,]+/);
+      const effTokens = (II.EFFECT || '').split(/[;,]+/);
       let best = -1;
-      effTokens.forEach(e => {
-        const key = e.trim().toUpperCase();
+      for (let k = 0; k < effTokens.length; k++){
+        const key = effTokens[k].trim().toUpperCase();
         if (key in SEVERITY && SEVERITY[key] > best){ best = SEVERITY[key]; impact = key; }
-      });
+      }
 
-      // genotypes in the exact order the caller selected
-      const gts = ids.map(id => {
-        const ci = sampleCols[id];
-        if (ci == null || t[ci] == null) return './.';
-        return (t[ci].split(':')[0] || './.').trim();
-      });
+      // genotypes in the exact order the caller selected, as 1-byte codes
+      const gts = new Int8Array(nIds);
+      for (let k = 0; k < nIds; k++){
+        const ci = sampleCols[ids[k]];
+        gts[k] = (ci == null) ? 3 : gtCode(t[ci]);
+      }
 
+      const mq = firstNum(II.MQ), cvp = firstNum(II.CVP), pos = parseInt(t[1], 10);
       rows.push({
-        pos:    parseInt(t[1], 10),
+        pos,
         ref:    t[3],
         alt:    t[4],
-        gene:   cleanTok(info(infoStr, 'GENEMODEL')) || '—',
-        effect: cleanTok(info(infoStr, 'TYPE')) || 'intergenic',
+        gene:   cleanTok(II.GENEMODEL) || '—',
+        effect: cleanTok(II.TYPE) || 'intergenic',
         impact,
-        sub:    cleanTok(info(infoStr, 'SUB')),
-        domain: domainAt(t[0], parseInt(t[1], 10)),     // Pfam domain covering this position (or '—')
-        mq:     (firstNum(info(infoStr, 'MQ')) != null) ? Math.round(firstNum(info(infoStr, 'MQ'))) : 'N/A',
-        comp:   (firstNum(info(infoStr, 'CVP')) != null) ? firstNum(info(infoStr, 'CVP')) : 'N/A',
-        r2:     firstNum(info(infoStr, 'MAXR2')),
-        maf:    (firstNum(info(infoStr, 'MAF')) != null) ? firstNum(info(infoStr, 'MAF')) : 0,
+        sub:    cleanTok(II.SUB),
+        domain: domainAt(t[0], pos),     // Pfam domain covering this position (or '—')
+        mq:     (mq != null) ? Math.round(mq) : 'N/A',
+        comp:   (cvp != null) ? cvp : 'N/A',
+        r2:     firstNum(II.MAXR2),
+        maf:    (firstNum(II.MAF) != null) ? firstNum(II.MAF) : 0,
         // 2026 uses plantcad1/2 + ESM1/2/3; older projects (2024/Schnable/NAM)
         // use a single DNA_SCORE (PlantCaduceus) and AA_SCORE (ESM1b) -> map to col 1.
-        pc1:    numOrNull(info(infoStr, 'plantcad1_score') != null ? info(infoStr, 'plantcad1_score') : info(infoStr, 'DNA_SCORE')),
-        pc2:    numOrNull(info(infoStr, 'plantcad2_score')),
-        esm1:   numOrNull(info(infoStr, 'ESM1_score') != null ? info(infoStr, 'ESM1_score') : info(infoStr, 'AA_SCORE')),
-        esm2:   numOrNull(info(infoStr, 'ESM2_score')),
-        esm3:   numOrNull(info(infoStr, 'ESM3_score')),
+        pc1:    numOrNull(II.plantcad1_score != null ? II.plantcad1_score : II.DNA_SCORE),
+        pc2:    numOrNull(II.plantcad2_score),
+        esm1:   numOrNull(II.ESM1_score != null ? II.ESM1_score : II.AA_SCORE),
+        esm2:   numOrNull(II.ESM2_score),
+        esm3:   numOrNull(II.ESM3_score),
         gts,
       });
     }
@@ -312,25 +374,54 @@ const Data = (function () {
     });
   }
 
+  /* Beyond this much table work (variants × accessions, or raw variant count)
+     the in-browser parse + render would freeze the tab for many seconds, so the
+     result is download-only — no table. Chosen so a typical selection (tens of
+     accessions, a few Mb) always renders, but a full panel or a genome-arm-wide
+     region does not. */
+  const TABLE_WORK_MAX = 4e7;
+  const TABLE_ROWS_MAX  = 400000;
+
+  /* genome-wide variant density per bp for a dataset, from its manifest `sites`
+     count ('98M' etc.) over the B73 v5 assembly length — used only to *predict*
+     in the run bar whether a query will come back as a table or a VCF download
+     (the real decision uses the exact server count). Regional density varies,
+     so this is a rough guide. */
+  const GENOME_LEN = Object.keys(CHR_LEN).reduce((s, c) => s + CHR_LEN[c], 0);
+  function siteCount(s){
+    const m = String(s || '').match(/([\d.]+)\s*([KMG]?)/i);
+    if (!m) return 0;
+    return parseFloat(m[1]) * ({K:1e3, M:1e6, G:1e9}[m[2].toUpperCase()] || 1);
+  }
+  /* estimateResult(datasetId, spanBp, nAccessions) -> {estVariants, willDownload} */
+  function estimateResult(datasetId, spanBp, nAccessions){
+    const d = DATASETS.find(x => x.id === datasetId);
+    const density = d ? siteCount(d.sites) / GENOME_LEN : 0;
+    const estVariants = Math.round(Math.max(0, spanBp) * density);
+    const willDownload = spanBp > CFG.tableMaxSpan
+      || estVariants > TABLE_ROWS_MAX
+      || estVariants * Math.max(1, nAccessions) > TABLE_WORK_MAX;
+    return {estVariants, willDownload};
+  }
+
   /**
-   * queryVariants(dataset, chr, lo, hi, ids) -> Promise<{rows, accs, chr, vcfUrl, span, wide, empty}>
-   * `wide` is true when the interval exceeds tableMaxSpan (offer download instead of table).
+   * queryVariants(dataset, chr, lo, hi, ids, opts) -> Promise<{rows, accs, chr, vcfUrl, span, wide, empty, variants}>
+   * `wide` is true when the result is too big for the table — the caller should
+   * offer the VCF download only. `opts.forceTable` skips the size gate (used by
+   * the internal gene-scoped callers, whose regions are always tiny).
    */
-  async function queryVariants(dataset, chr, lo, hi, ids){
+  async function queryVariants(dataset, chr, lo, hi, ids, opts){
+    opts = opts || {};
+    const forceTable = !!opts.forceTable;
     ids = sortIds(dataset, ids);      // group by project, then accession name
     const accs = accsFor(dataset, ids);
     const span = Math.max(hi - lo, 0);
     const outName = uniqueOutName(lo, hi);
 
     const body = new URLSearchParams({
-      start: String(lo),
-      end: String(hi),
-      chr: chr,                         // e.g. "chr10" — matches the .h5 filename token
-      dataSet: dataset,
-      genotypes: JSON.stringify(ids),
-      outName: outName,
+      start: String(lo), end: String(hi), chr: chr, dataSet: dataset,
+      genotypes: JSON.stringify(ids), outName: outName,
     });
-
     const resp = await fetch(CFG.endpoint, {
       method: 'POST',
       headers: {'Content-Type': 'application/x-www-form-urlencoded'},
@@ -345,9 +436,7 @@ const Data = (function () {
     if (json.status === 'empty'){
       return {rows:[], accs, chr, vcfUrl:null, span, wide:false, empty:true};
     }
-
     if (!resp.ok || json.status !== 'success'){
-      // Print the raw script output so the true cause is visible in the console.
       if (json.output)  console.error('[processForm.php] h5_to_vcf.py output:\n' + json.output);
       if (json.command) console.error('[processForm.php] command:\n' + json.command);
       const err = new Error(json.message || ('Request failed (HTTP ' + resp.status + ')'));
@@ -356,21 +445,34 @@ const Data = (function () {
     }
 
     const vcfUrl = json.outFile || outName;
+    const variants = (json.variants != null && isFinite(+json.variants)) ? +json.variants : null;
 
-    // Very wide interval: don't try to render a giant table.
-    if (span > CFG.tableMaxSpan){
-      return {rows:[], accs, chr, vcfUrl, span, wide:true, empty:false};
+    // Too big for an in-browser table — download only. The server tells us the
+    // exact variant count, so this decision happens *before* the fetch + parse.
+    const tooBig = span > CFG.tableMaxSpan
+      || (variants != null && (variants > TABLE_ROWS_MAX || variants * ids.length > TABLE_WORK_MAX));
+    if (tooBig && !forceTable){
+      return {rows:[], accs, chr, vcfUrl, span, variants, wide:true, empty:false};
     }
 
-    const vcfResp = await fetch(vcfUrl, {cache:'no-store'});
-    if (!vcfResp.ok){
-      // No VCF written usually means the range returned no variants.
-      return {rows:[], accs, chr, vcfUrl, span, wide:false, empty:true};
+    // Fetch the VCF, retrying briefly — right after the server writes it, a
+    // same-machine dev server can 404 it for a moment (Windows file handle) or
+    // lose the race against a user-triggered download of the same URL.
+    let vcfResp = null;
+    for (let attempt = 0; attempt < 4; attempt++){
+      if (attempt) await new Promise(r => setTimeout(r, 250 * attempt));
+      try { vcfResp = await fetch(vcfUrl, {cache:'no-store'}); } catch (e) { vcfResp = null; }
+      if (vcfResp && vcfResp.ok) break;
     }
-    const vcfText = await vcfResp.text();
+    if (!vcfResp || !vcfResp.ok){
+      const err = new Error('The VCF was built but could not be retrieved (' + (vcfResp ? 'HTTP ' + vcfResp.status : 'network error') + '). It is still available to download.');
+      err.detail = {vcfUrl};
+      throw err;
+    }
+    const vcfText = await readVcfResponse(vcfResp);
     await ensureDomains(chr);                    // load just this chromosome's Pfam file (cached)
     const {rows} = parseVcf(vcfText, ids);
-    return {rows, accs, chr, vcfUrl, span, wide:false, empty: rows.length === 0};
+    return {rows, accs, chr, vcfUrl, span, variants, wide:false, empty: rows.length === 0};
   }
 
   /* =============================================================
@@ -544,7 +646,7 @@ const Data = (function () {
     if (!g || !g.chr) return [];
     ids = ids || defaultSelectionFor(dataset);
     let res;
-    try { res = await queryVariants(dataset, g.chr, g.start, g.end, ids); }
+    try { res = await queryVariants(dataset, g.chr, g.start, g.end, ids, {forceTable:true}); }
     catch (e){ console.warn('queryFoldVariants:', e && e.message); return []; }
     const out = [];
     for (const r of (res.rows || [])){
@@ -666,12 +768,8 @@ const Data = (function () {
   function geneModelOf(chr, gene){ return (_gmByChr[chr] || {})[gene] || null; }
 
   /* ---------- SNPFunction: gene-scoped functional dossier + allele mining ---------- */
-  function _dose(g){
-    if (g == null) return null;
-    const s = String(g); if (s==='./.'||s==='.'||s==='') return null;
-    const a = s.split(/[\/|]/); if (a.length < 2 || a[0]==='.' || a[1]==='.') return null;
-    return (a[0]!=='0'?1:0) + (a[1]!=='0'?1:0);        // 0 / 1 / 2
-  }
+  // gts entries are now 1-byte codes from parseVcf: 0/1/2 = dosage, 3 = missing.
+  function _dose(g){ return (g == null || g === 3) ? null : g; }
   function _avg(a){ return a.length ? +(a.reduce((s,x)=>s+x,0)/a.length).toFixed(2) : null; }
 
   // Aggregate a gene across the WHOLE panel: which accessions carry damaging/LOF alleles.
@@ -683,7 +781,7 @@ const Data = (function () {
     const ids = (accessionsFor(dataset)||[]).map(a=>a.id);            // FULL panel
     await Promise.all([ensureDomains(g.chr), ensureGeneDomains(), ensureGeneModels(g.chr)]);
     let res;
-    try { res = await queryVariants(dataset, g.chr, g.start, g.end, ids); }
+    try { res = await queryVariants(dataset, g.chr, g.start, g.end, ids, {forceTable:true}); }
     catch (e){ return {gene, chr:g.chr, start:g.start, end:g.end, dataset, datasetName:dsName, error:'Variant query failed: '+(e&&e.message)}; }
 
     const accs = res.accs || [];
@@ -765,6 +863,7 @@ const Data = (function () {
     lookupGene,             // async: gene model id -> {id, chr, start, end} | null
     chromLengths:() => CHR_LEN,
     centromeres: () => CENTRO,
+    estimateResult,                        // run-bar prediction: table vs VCF download
     accessionById,
     queryVariants,          // now async (returns a Promise)
     queryImpact,

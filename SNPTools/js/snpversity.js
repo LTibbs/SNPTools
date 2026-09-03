@@ -247,8 +247,7 @@ function renderRegion(){
       </div>
       <div class="region-meta">
         <div class="m"><div class="v" id="mSpan"></div><div class="k">interval span</div></div>
-        <div class="m"><div class="v" id="mMode"></div><div class="k">view mode</div></div>
-        <div class="m"><div class="v" id="mAcc"></div><div class="k">accessions</div></div>
+        <div class="m"><div class="v" id="mAcc"></div><div class="k">accessions selected</div></div>
       </div>
     </div>
     <div class="form-pane">
@@ -310,7 +309,6 @@ function drawRibbon(){
   const fmt=n=>n>=1e6?(n/1e6).toFixed(2)+' Mb':n>=1e3?(n/1e3).toFixed(1)+' kb':n+' bp';
   document.getElementById('ribCoord').textContent=`${S.chr}:${lo.toLocaleString()}–${hi.toLocaleString()}`;
   document.getElementById('mSpan').textContent=fmt(span);
-  document.getElementById('mMode').textContent= span>1e6?'VCF download':'Interactive table';
   document.getElementById('mAcc').textContent=S.selected.size;
 }
 async function loadGene(){
@@ -722,11 +720,18 @@ function renderRunbar(){
   const lo=Math.min(S.start,S.end),hi=Math.max(S.start,S.end);
   const span=hi-lo;
   const ready=S.selected.size>0 && span>0;
+  // rough pre-run prediction (the real table-vs-download call uses the exact
+  // variant count the server returns).
+  const est=ready ? Data.estimateResult(S.dataset, span, S.selected.size) : null;
+  const mode = est ? (est.willDownload
+    ? '<span style="color:var(--faint)">likely too large for the table — returns a downloadable VCF</span>'
+    : 'opens as an interactive table') : '';
+  const spanStr = span>=1e6 ? (span/1e6).toFixed(2)+' Mb' : (span/1e3).toFixed(1)+' kb';
   rb.innerHTML=`
     <div class="summ">
       <span class="kick${ready?'':' wait'}">${ready?'Ready to run':'Finish steps 1–3 to run'}</span>
       <b>${d.name} ${d.sub}</b> · <span class="mono">${S.chr}:${lo.toLocaleString()}–${hi.toLocaleString()}</span><br>
-      <span>${S.selected.size} accessions · ${(span/1e3).toFixed(1)} kb interval · ${span>1e6?'returns a VCF file':'returns an interactive table'}</span>
+      <span>${S.selected.size} accessions · ${spanStr} interval${mode?' · '+mode:''}</span>
     </div>
     <div class="spacer"></div>
     <button class="btn primary" ${ready?'':'disabled'} onclick="runQuery()">
@@ -743,15 +748,20 @@ function noticeCard(title, body){
 async function runQuery(){
   touchSelection();          // the selection is committed — the Undo no longer applies
   const anchor=document.getElementById('resultsAnchor');
-  anchor.innerHTML=`<div class="card" style="overflow:hidden"><div class="loading"><div class="spinner"></div><div>Reading HDF5 store and assembling VCF…</div></div></div>`;
+  anchor.innerHTML=`<div class="card" style="overflow:hidden"><div class="loading">
+    <div class="spinner"></div>
+    <div>Reading HDF5 store and assembling VCF…</div>
+    <div class="load-hint">
+      Large regions and big accession sets can take a while. A smaller region, fewer accessions,
+      or a lower-density SNP set will load faster.
+    </div>
+  </div></div>`;
   anchor.scrollIntoView({behavior:'smooth',block:'start'});
   const lo=Math.min(S.start,S.end), hi=Math.max(S.start,S.end);
   try{
     S.results = await Data.queryVariants(S.dataset, S.chr, lo, hi, [...S.selected]);
     if(S.results.wide){
-      anchor.innerHTML=noticeCard('Interval too wide for the table view',
-        `This interval spans ${((hi-lo)/1e6).toFixed(2)} Mb. The table view is available for regions up to 1 Mb. `+
-        `<br><br><button class="btn" onclick="downloadVCF()">${ICONS.download} Download the VCF file</button>`);
+      anchor.innerHTML=wideResultCard(S.results, lo, hi);
       return;
     }
     if(S.results.empty || !S.results.rows.length){
@@ -761,18 +771,34 @@ async function runQuery(){
     }
     S.page=1; renderResults();
   }catch(err){
+    const url=err&&err.detail&&err.detail.vcfUrl;   // set when the VCF was built but the fetch failed
     anchor.innerHTML=noticeCard('The query failed',
-      `<span style="color:var(--muted)">${(err&&err.message?err.message:err)}</span>`);
+      `<span style="color:var(--muted)">${(err&&err.message?err.message:err)}</span>`+
+      (url?`<br><br><button class="btn" onclick="downloadVcfUrl('${url}')">${ICONS.download} Download the VCF</button>`:''));
     console.error('SNPVersity query failed:', err);
   }
 }
-/* download the VCF produced by the most recent query */
-function downloadVCF(){
-  const url=S.results&&S.results.vcfUrl; if(!url)return;
+/* Result is too large for the in-browser table — VCF download only. */
+function wideResultCard(res, lo, hi){
+  const V=res.variants, A=(S.selected&&S.selected.size)||0;
+  const size = V!=null ? `<b>${V.toLocaleString()}</b> variants x <b>${A}</b> accessions`
+                       : `a <b>${((hi-lo)/1e6).toFixed(2)} Mb</b> interval`;
+  return `<div class="card pad fade" style="text-align:center">
+    <h3 style="font-family:var(--disp);margin:0 0 8px">Result too large for the table view</h3>
+    <p style="color:var(--muted);margin:0 auto 14px;max-width:560px">This query returns ${size}.
+    Download the VCF to work with it directly, or else choose a smaller region, fewer accessions, or lower-density SNP set.</p>
+    <button class="btn primary" onclick="downloadVCF()">${ICONS.download} Download the VCF</button>
+  </div>`;
+}
+/* download a VCF by explicit URL */
+function downloadVcfUrl(url){
+  if(!url)return;
   const a=document.createElement('a');
   a.href=url; a.download=url.split('/').pop();
   document.body.appendChild(a); a.click(); a.remove();
 }
+/* download the VCF produced by the most recent query */
+function downloadVCF(){ downloadVcfUrl(S.results&&S.results.vcfUrl); }
 function gColor(s){
   if(s===null||s===undefined) return '#e7ebf1';
   const min=-15,max=10, c=Math.max(min,Math.min(s,max));
@@ -781,18 +807,45 @@ function gColor(s){
   return `rgb(${Math.round(255*(1-r))},${Math.round(255*r)},0)`;
 }
 
+/* Hard "you can't send this there" gate for the result toolbar — greys a
+   button only when the target tool would almost certainly kill the tab
+   (memory ceiling, or a ~minute-long synchronous compute). Slower-but-doable
+   sizes stay enabled and are caught by each tool's own "build anyway" notice.
+   The header "Send selection to…" menu isn't greyed; the tool guards catch it. */
+function sendGate(tool){
+  const V = (S.results && S.results.rows) ? S.results.rows.length : 0;
+  const A = S.selected ? S.selected.size : 0;
+  if(tool==='impact')
+    return V > IBS_COST.impactBlock
+      ? {ok:false, msg:'Selected data too large for SNPImpact - choose a smaller region or lower-density SNP set'}
+      : {ok:true};
+  if(tool==='tree')
+    return ibsWork(V,A) > IBS_COST.workBlock
+      ? {ok:false, msg:'Selected data too large for SNPTree - choose a smaller region, a lower-density SNP set, or fewer accessions'}
+      : {ok:true};
+  if(tool==='compare')
+    return (ibsWork(V,A) > IBS_COST.cmpWorkBlock || V*A > IBS_COST.cmpMemBlock)
+      ? {ok:false, msg:'Selected data too large for SNPCompare - choose a smaller region, a lower-density SNP set, or fewer accessions'}
+      : {ok:true};
+  return {ok:true};
+}
+function sendBtnHTML(fn, gate, label, icon){
+  return `<button class="btn${gate.ok?'':' off'}" ${gate.ok?'':`aria-disabled="true" data-tt="${escAttr(gate.msg)}"`} onclick="${fn}">${icon||''} ${label}</button>`;
+}
+
 function renderResults(){
   const a=document.getElementById('resultsAnchor');
   const lo=Math.min(S.start,S.end), hi=Math.max(S.start,S.end);
+  const pgOK=(hi-lo)<=PANGENOME_MAX_SPAN;
   a.innerHTML=`
     <div class="sec"><div class="bar"></div>
       <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;width:100%">
         <h2 style="font-size:16px;margin:0">Variant view · <span class="c-mono" style="color:var(--blue-600)">${S.chr}:${lo.toLocaleString()}–${hi.toLocaleString()}</span></h2>
         <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap">
-          <button class="btn" onclick="sendToImpact()">${ICONS.star||''} Send to SNPImpact</button>
-          <button class="btn" onclick="sendToCompare()">${ICONS.compare||ICONS.grid||''} Send to SNPCompare</button>
-          <button class="btn" onclick="sendToTree()">${ICONS.tree} Send data to SNPTree</button>
-          <button class="btn" onclick="openPangenomeRegion()">${ICONS.grid||''} Pangenome viewer ↗</button>
+          ${sendBtnHTML('sendToImpact()',  sendGate('impact'),  'Send to SNPImpact',   ICONS.star)}
+          ${sendBtnHTML('sendToCompare()', sendGate('compare'), 'Send to SNPCompare',  ICONS.compare||ICONS.grid)}
+          ${sendBtnHTML('sendToTree()',    sendGate('tree'),    'Send data to SNPTree', ICONS.tree)}
+          <button class="btn${pgOK?'':' off'}" ${pgOK?'':'aria-disabled="true" data-tt="Selected region too large for Pangenome viewer - choose a region under 10 kb"'} onclick="openPangenomeRegion()">${ICONS.grid||''} Pangenome viewer ↗</button>
           <button class="btn" onclick="downloadVCF()">${ICONS.download} Download VCF</button>
         </div>
       </div>
@@ -867,20 +920,31 @@ function setMaf(el){
   v=Math.round(v*100)/100;              // snap to 0.01
   S.fMaf=v; S.page=1; renderTable();
 }
+/* Cache the O(rows) work (full-table filter + distinct-effects scan) so that
+   paging — which doesn't change the filter — doesn't re-scan every variant on
+   each click. Keyed on the result set + the three filter controls. */
+let _tblCache=null;
+function tableView(rows){
+  const key=S.results&&S.results.vcfUrl+'|'+S.fImpact+'|'+S.fEffect+'|'+S.fMaf;
+  if(_tblCache&&_tblCache.key===key) return _tblCache;
+  const fr=rows.filter(r=>
+    (S.fImpact==='all'||r.impact===S.fImpact) &&
+    (S.fEffect==='all'||r.effect===S.fEffect) &&
+    (r.maf>=S.fMaf));
+  const effects=['all',...new Set(rows.map(r=>r.effect))];
+  _tblCache={key,fr,effects};
+  return _tblCache;
+}
+
 function renderTable(){
   const {rows,accs}=S.results;
   // accession header height scales to the longest full ID so it isn't clipped
   const maxIdLen=accs.length?Math.max(...accs.map(a=>String(a.id).length)):8;
   const thH=Math.max(118, Math.min(300, Math.round(maxIdLen*6.4)+30));
-  // filter
-  let fr=rows.filter(r=>
-    (S.fImpact==='all'||r.impact===S.fImpact) &&
-    (S.fEffect==='all'||r.effect===S.fEffect) &&
-    (r.maf>=S.fMaf));
+  const {fr,effects}=tableView(rows);
   const perPage=S.perPage, pages=Math.max(1,Math.ceil(fr.length/perPage));
   if(S.page>pages)S.page=1;
   const slice=fr.slice((S.page-1)*perPage, S.page*perPage);
-  const effects=['all',...new Set(rows.map(r=>r.effect))];
 
   const b=document.getElementById('rtBody');
   b.innerHTML=`
@@ -964,12 +1028,20 @@ function rowHTML(r){
     <td class="num">${r.r2===null?'<span style="color:var(--faint)">NA</span>':r.r2}</td>
     <td class="num">${r.maf}</td>
     ${sc(r.pc1)}${sc(r.pc2)}${sc(r.esm1)}${sc(r.esm2)}${sc(r.esm3)}
-    ${r.gts.map(g=>{
-      const cls=g==='0/0'?'gt-00':(g==='1/1'?'gt-11':(g==='./.'?'gt-na':'gt-01'));
-      const v=g==='0/0'?'0':(g==='1/1'?'2':(g==='./.'?'·':'1'));
-      return `<td class="gt ${cls}" data-tt="${g}">${v}</td>`;
-    }).join('')}
+    ${gtCells(r.gts)}
   </tr>`;
+}
+/* r.gts is an Int8Array of codes (0 ref, 1 het, 2 alt, 3 missing). Build the
+   genotype cells with an indexed loop — Int8Array.map would coerce back to
+   numbers, and this is the hottest string-building path in the table. */
+const GT_CELL_CLASS=['gt-00','gt-01','gt-11','gt-na'];
+const GT_CELL_TEXT =['0','1','2','·'];
+const GT_CELL_TT   =['0/0','0/1','1/1','./.'];
+function gtCells(gts){
+  let s='';
+  for(let k=0;k<gts.length;k++){ const c=gts[k];
+    s+=`<td class="gt ${GT_CELL_CLASS[c]}" data-tt="${GT_CELL_TT[c]}">${GT_CELL_TEXT[c]}</td>`; }
+  return s;
 }
 /* "Gene model" table cell: link real gene models to their MaizeGDB page.
    maizegdbGeneURL / isSingleGeneModel are shared helpers defined in core.js.
@@ -1003,6 +1075,9 @@ function genesPanel(){
 }
 /* ---- MaizeGDB Pangenome viewer links (B73 v5 coordinates / gene models) ---- */
 const PANGENOME_BASE = 'https://pangenome-viewer.maizegdb.org/';
+/* The Pangenome viewer only accepts interval spans up to 10 kb; a wider
+   region stalls it, so the region hand-off is greyed out past this. */
+const PANGENOME_MAX_SPAN = 10000;
 /* link for a single B73 gene model */
 function pangenomeGeneURL(gene, set){
   return `${PANGENOME_BASE}?set=${encodeURIComponent(set||'NAM')}&geneID=${encodeURIComponent(gene)}`;
@@ -1015,6 +1090,8 @@ function pangenomeRegionURL(chr, start, end, set){
 }
 /* open the current query region in the Pangenome viewer */
 function openPangenomeRegion(){
+  const lo=Math.min(S.start,S.end), hi=Math.max(S.start,S.end);
+  if(hi-lo > PANGENOME_MAX_SPAN) return;   // button is greyed out in this case
   window.open(pangenomeRegionURL(S.chr,S.start,S.end),'_blank','noopener');
 }
 /* Jump to SNPFold for a specific gene model.

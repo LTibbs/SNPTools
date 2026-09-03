@@ -61,7 +61,7 @@ const SNPCompare = (function () {
     /* analysis is only (re)run when a view button is pressed — nothing runs
        on page load or when options change. `ran` tracks whether a result is
        currently on screen; `ranFocal`/`ranMode` remember what produced it. */
-    ran:false, ranFocal:null, ranMode:null,
+    ran:false, ranFocal:null, ranMode:null, force:false,
     mdsLabels:'auto',      // PCoA label strategy: auto | all | focal | none
     input:null,            // local hand-off {rows, accs, chr, start, end, dataset,...}
     globalCache:{},        // focalId -> {rows, demo}
@@ -77,9 +77,9 @@ const SNPCompare = (function () {
     _pairs:null, _pairsKey:null, _scale:null, _layout:null,
   };
 
-  /* ---------------- genotype + IBS ---------------- */
-  function dose(g){ if(g==null)return null; if(g==='0/0')return 0; if(g==='1/1')return 2;
-    if(g==='./.'||g==='.'||g==='')return null; return 1; }
+  /* ---------------- genotype + IBS ----------------
+     gts entries are 1-byte codes from Data.parseVcf: 0/1/2 = dosage, 3 = missing. */
+  function dose(g){ return (g == null || g === 3) ? null : g; }
 
   function minSites(total){
     if(ST.minSites!=null) return ST.minSites;
@@ -397,7 +397,7 @@ const SNPCompare = (function () {
     const request=S.compareRequest||null;
     S.compareRequest=null;
     const prevDs=ST.dataset;
-    if(S.compareInput){ if(S.compareInput!==ST.input){ ST._pairs=null; ST._layout=null; } ST.input=S.compareInput; }
+    if(S.compareInput){ if(S.compareInput!==ST.input){ ST._pairs=null; ST._layout=null; ST.force=false; } ST.input=S.compareInput; }
     if(ST.input){ ST.dataset=ST.input.dataset||ST.dataset; }
     if(ST.dataset!==prevDs){ ST.focal=null; ST._meta=null; ST.globalCache={}; ST.allRows=[]; ST._pairs=null; }
     const gAvail=globalAvailable();
@@ -1082,10 +1082,22 @@ const SNPCompare = (function () {
     if(ST.mode!=='global' && ST.input && !ST.input.accs.some(a=>a.id===ST.focal)){
       if(wrap) wrap.innerHTML=notice(`Focal accession “${esc(ST.focal)}” isn’t in the region result. Pick one of the accessions you queried, or switch scope to Genome-wide.`); return;
     }
+    if(ST.mode!=='global' && ST.input){
+      const A=ST.input.accs.length, V=(ST.input.rows&&ST.input.rows.length)||0;
+      if(ibsWork(V,A) > IBS_COST.cmpWorkBlock || V*A > IBS_COST.cmpMemBlock){
+        if(wrap) wrap.innerHTML=notice('Selected data too large for SNPCompare - choose a smaller region, a lower-density SNP set, or fewer accessions, then re-run in SNPVersity.'); return;
+      }
+      if((ibsWork(V,A) > IBS_COST.cmpWorkWarn || V*A > IBS_COST.cmpMemWarn) && !ST.force){
+        if(wrap) wrap.innerHTML=notice(
+          `<b>${A}</b> accessions × <b>${V.toLocaleString()}</b> variants — computing all pairwise IBS will make the page unresponsive for roughly ${Math.max(1,cmpSeconds(V,A))}s.`+
+          `<br><br><button class="btn" onclick="SNPCompare.forceRun()">Compute anyway</button>`); return;
+      }
+    }
     if(wrap) wrap.innerHTML=`<div class="loading"><div class="spinner"></div><div>Computing similarities…</div></div>`;
     try{ await buildRows(); paint(); ST.ran=true; ST.ranFocal=ST.focal; ST.ranMode=ST.mode; updatePending(); }
     catch(err){ if(wrap) wrap.innerHTML=notice('Could not load similarities: '+esc(err.message||err)); }
   }
+  function forceRun(){ ST.force=true; recompute(); }
   /* idle placeholder shown before anything is run (or after options change) */
   function idleMessage(){
     if(!hasLocal() && !globalAvailable())
@@ -1285,7 +1297,7 @@ const SNPCompare = (function () {
 
   return { render, setFocalFromInput, syncFocal, pickFocal, runCurrent, pick, setMode, setView,
            setF, setScale, setLower, setOrder, setMinSites, setDropMiss, setMdsLabels,
-           clearFilters, sortBy, toTree, toMatrix, exportCSV, exportMatrixCSV, saveImage,
+           clearFilters, sortBy, toTree, toMatrix, exportCSV, exportMatrixCSV, saveImage, forceRun,
            // testing / debugging
            dose, localCompute, allPairs, buildScale, cluster, pcoa, planLabels, getGlobal, _CFG:CFG, _ST:ST };
 })();

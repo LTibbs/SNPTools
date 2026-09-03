@@ -1,1 +1,21 @@
+# Genotype HDF5 store — large binary data, NEVER committed to git.
+#
+# processForm.php ($VERSION_PATH = './hdf5/version3/') expects per-chromosome
+# files in version3/, named <family>_<chr>_<quality>.h5, e.g.:
+#
+#   version3/maizegdb2026_chr10_HQ.h5   (MaizeGDB 2026, High Quality)
+#   version3/maizegdb2026_chr10_HC.h5   (MaizeGDB 2026, High Coverage)
+#   version3/maizegdb2024_chr10_HQ.h5
+#   version3/schnable2023_chr10_impute.h5
+#   version3/nam2021_chr10_HQ.h5
+#
+# Obtain these from the data owner / collaborator and drop them in place;
+# they are intentionally kept out of the repo.
 
+# Ignore everything in this directory ...
+*
+# ... except this file and the version3/ folder skeleton.
+!.gitignore
+!version3/
+version3/*
+!version3/.gitkeep
