@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SNPTools — SNPVersity 2.1</title>
+<script type='text/javascript' src='https://maizegdb.atlassian.net/s/d41d8cd98f00b204e9800998ecf8427e-T/-3o5b4z/b/5/c95134bc67d3a521bb3f4331beb9b804/_/download/batch/com.atlassian.jira.collector.plugin.jira-issue-collector-plugin:issuecollector/com.atlassian.jira.collector.plugin.jira-issue-collector-plugin:issuecollector.js?locale=en-US&collectorId=883299e6'></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;450;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" media="print" onload="this.media='all'">
@@ -82,7 +83,11 @@
         <a class="mg-help" href="#help" onclick="openHelp();return false;" aria-label="Help and FAQ">
           <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.8"/><path d="M9.5 9.4a2.5 2.5 0 114 2c-.9.7-1.5 1.2-1.5 2.3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="17" r="1.1" fill="currentColor"/></svg>
           <span class="mg-lbl">Help &amp; FAQ</span>
+          
         </a>
+        <a class="feedback-form mg-help" href="#" aria-label="Contact us">
+    <span class="mg-lbl">Contact us</span>
+</a>
       </nav>
     </div>
 
@@ -149,5 +154,24 @@
 <script src="./js/snpcompare.js"></script>
 <script src="./js/snpfunction.js"></script>
 <script src="./js/snphelp.js"></script>
+<script type="text/javascript">
+    window.ATL_JQ_PAGE_PROPS = {
+          '883299e6': {  // feedback
+            "triggerFunction": function(showCollectorDialog) {
+              /* Delegated listener so .feedback-form links added later (e.g. inside
+                 a tool's pop-up) open the collector too, not just the header button. */
+              document.addEventListener('click', function(e) {
+                if (!e.target.closest || !e.target.closest('.feedback-form')) return;
+                e.preventDefault();
+                showCollectorDialog();
+              });
+            },
+              fieldValues: {
+                recordWebInfo: '1', // field Name
+          recordWebInfoConsent: ['1'] // field Id
+              }
+            }
+    };
+</script>
 </body>
 </html>

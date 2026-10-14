@@ -2052,8 +2052,8 @@
             '<li>Genome-wide P values (preferred), or at least P values for every marker with P &lt; 0.001</li>' +
             '<li>Marker coordinates and the genome version those coordinates refer to</li>' +
           '</ul>' +
-          '<p class="gwx-contribute-submit">To inquire about submitting data, go to <a href="https://www.maizegdb.org" target="_blank" rel="noopener">MaizeGDB</a> ' +
-            'and click <b>Feedback</b> at the top right of the page to send us a message.</p>' +
+          '<p class="gwx-contribute-submit">To inquire about submitting data, please ' +
+            '<a href="#" class="feedback-form" id="gwxContributeContactLink">contact us</a>.</p>' +
           '<h4>Data Submission Formatting</h4>' +
           '<p>A CSV or TSV file with the columns below. Only Chr, bp, and p are required, but we also ask for the alleles (A1, A2), ' +
             'allele frequency (Freq), allelic effect size (b), and its standard error (se) if you have them.</p>' +
@@ -2080,7 +2080,10 @@
     const close = function () { setContributeOpen(false); };
     const openBtn = document.getElementById('gwxOpenContributeBtn');
     if (openBtn) openBtn.addEventListener('click', function () { setContributeOpen(true); });
-    ['gwxContributeCloseBtn', 'gwxContributeDoneBtn', 'gwxContributeBackdrop'].forEach(function (id) {
+    /* the contact link opens the site-wide feedback form (index.html's
+       delegated .feedback-form listener); close this pop-up so the two
+       dialogs don't stack */
+    ['gwxContributeCloseBtn', 'gwxContributeDoneBtn', 'gwxContributeBackdrop', 'gwxContributeContactLink'].forEach(function (id) {
       const el = document.getElementById(id);
       if (el) el.addEventListener('click', close);
     });
